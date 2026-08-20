@@ -1,0 +1,24 @@
+{
+  "name": "distributed-message-broker",
+  "version": "1.0.0",
+  "description": "A lightweight distributed message broker built from scratch in Node.js",
+  "main": "src/broker/broker.js",
+  "type": "module",
+  "scripts": {
+    "broker": "node src/broker/broker.js",
+    "producer": "node src/producer/producer.js",
+    "consumer": "node src/consumer/consumer.js",
+    "test": "node tests/broker.test.js && node tests/protocol.test.js",
+    "test:broker": "node tests/broker.test.js",
+    "test:protocol": "node tests/protocol.test.js"
+  },
+  "keywords": [
+    "distributed-systems",
+    "tcp",
+    "message-broker",
+    "ndjson",
+    "nodejs"
+  ],
+  "author": "",
+  "license": "MIT"
+}
