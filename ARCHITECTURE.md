@@ -1,4 +1,4 @@
-# Distributed Message Broker - Architecture Document
+# Distributed Message Broker — Architecture Document
 
 ## System Overview
 A lightweight, high-performance distributed message broker designed for asynchronous event-driven messaging across microservices.
@@ -6,43 +6,65 @@ A lightweight, high-performance distributed message broker designed for asynchro
 ```
 +------------------+          +------------------------+          +------------------+
 |     Producer     |  ----->  | Distributed Broker Node|  ----->  |     Consumer     |
-| (Publish Event)  |   TCP    |  (Topic/Partition/Log) |   TCP    | (Subscribe Event)|
+| (Publish Event)  |   TCP    |  (In-Memory Store / Log)|   TCP    | (Consume Event)  |
 +------------------+          +------------------------+          +------------------+
 ```
 
-## Core Components (Planned Roadmap)
-1. **Transport Layer**: High-concurrency TCP Server handling client connections and custom binary/text protocol frame parsing.
-2. **Broker Core**: Topic & Partition management, Message Storage Engine (Append-Only Log + Index).
-3. **Consumer Management**: Push/Pull delivery models, Consumer Groups, Offset Tracking.
-4. **Distributed Consensus & Clustering**: Multi-node replication, Leader Election, High Availability.
+## Milestone 2 Layered Protocol Architecture
 
-## Current System Architecture (Phase 1: TCP Core & Protocol Parser)
+Milestone 2 establishes a structured, decoupled, multi-layer protocol pipeline for TCP communication:
 
 ```
-                       +-----------------------------------+
-                       |        TCP Socket Server          |
-                       |    (Node.js 'net' on Port 4222)   |
-                       +-----------------------------------+
-                                         |
-                                    (Raw Buffers)
-                                         v
-                       +-----------------------------------+
-                       |      Protocol Stream Parser       |
-                       | (Line Delimited + Length-Prefixed)|
-                       +-----------------------------------+
-                                         |
-                                (Parsed Command Frame)
-                                         v
-                       +-----------------------------------+
-                       |         Broker Core Engine        |
-                       |  (Topic Registry & Client Sockets)|
-                       +-----------------------------------+
+                      +-----------------------------------+
+                      |         TCP Connection            |
+                      |   (Node.js 'net' Socket / Server) |
+                      +-----------------------------------+
+                                        | (Raw Byte Chunks)
+                                        v
+                      +-----------------------------------+
+                      |      StreamFramer (Framing)       |
+                      | (Delimiter Buffer & Boundary Split)|
+                      +-----------------------------------+
+                                        | (Wire Strings)
+                                        v
+                      +-----------------------------------+
+                      |     ProtocolDecoder (Codec)       |
+                      | (Wire String -> Request Object)   |
+                      +-----------------------------------+
+                                        | (Request Object)
+                                        v
+                      +-----------------------------------+
+                      |  RequestValidator (Validation)    |
+                      | (Schema & Field Constraint Checks)|
+                      +-----------------------------------+
+                                        | (Validated Request)
+                                        v
+                      +-----------------------------------+
+                      |     MessageBroker Core Engine     |
+                      | (Pure In-Memory Store Logic)      |
+                      +-----------------------------------+
+                                        | (Response Object)
+                                        v
+                      +-----------------------------------+
+                      |     ProtocolEncoder (Codec)       |
+                      | (Response Object -> Wire Frame)   |
+                      +-----------------------------------+
+                                        | (Framed String)
+                                        v
+                      +-----------------------------------+
+                      |         TCP Connection            |
+                      |     (socket.write Payload)        |
+                      +-----------------------------------+
 ```
 
 ### Module Structure
-- `src/protocol/parser.js`: Accumulates raw TCP stream buffers, parses complete header lines (`\r\n`) and length-prefixed payload frames.
-- `src/protocol/commands.js`: Defines commands (`PUB`, `SUB`, `UNSUB`, `ACK`, `MSG`, `ERR`, `OK`) and wire format formatters.
-- `src/broker/broker.js`: Manages topic subscriptions, active consumer client sockets, and dispatches messages to subscribers.
-- `src/broker/server.js`: Handles TCP connection lifecycle, socket read/write streams, and disconnect cleanup.
-- `src/index.js`: Server entry point.
 
+- `src/protocol/types.js`: Defines request constants (`PING`, `PRODUCE`, `CONSUME`), response constants (`PONG`, `PRODUCE_ACK`, `MESSAGE`, `NO_MESSAGES`, `ERROR`), and request/response object creators.
+- `src/protocol/framing.js`: `StreamFramer` class for stream byte accumulation, frame boundary extraction, partial frame handling, and max frame size limit enforcement.
+- `src/protocol/codec.js`: `ProtocolDecoder` (deserializes wire strings into request objects) and `ProtocolEncoder` (serializes response/request objects into framed wire strings).
+- `src/protocol/validator.js`: `RequestValidator` for enforcing request object structure, command type validation, and message string constraints before reaching broker logic.
+- `src/broker/broker.js`: `MessageBroker` domain engine class containing pure message queue storage/retrieval logic.
+- `src/broker/server.js`: `BrokerServer` TCP listener connecting TCP sockets to the multi-layer protocol pipeline.
+- `src/producer/producer.js`: Producer client operating through the protocol framing and codec layer.
+- `src/consumer/consumer.js`: Consumer client operating through the protocol framing and codec layer.
+- `src/index.js`: Main server execution entry point.

@@ -5,10 +5,12 @@
   "main": "src/broker/broker.js",
   "type": "module",
   "scripts": {
-    "broker": "node src/broker/broker.js",
+    "broker": "node src/broker/server.js",
     "producer": "node src/producer/producer.js",
     "consumer": "node src/consumer/consumer.js",
-    "test": "node tests/broker.test.js && node tests/protocol.test.js",
+    "test": "node tests/framing.test.js && node tests/codec.test.js && node tests/broker.test.js && node tests/protocol.test.js",
+    "test:framing": "node tests/framing.test.js",
+    "test:codec": "node tests/codec.test.js",
     "test:broker": "node tests/broker.test.js",
     "test:protocol": "node tests/protocol.test.js"
   },

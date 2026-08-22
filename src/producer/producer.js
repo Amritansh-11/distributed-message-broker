@@ -1,34 +1,41 @@
 import net from 'net';
-import { NDJSONFramer } from '../protocol/message.js';
+import { fileURLToPath } from 'url';
+import { StreamFramer } from '../protocol/framing.js';
+import { ProtocolEncoder, ProtocolDecoder } from '../protocol/codec.js';
+import { ProtocolRequest } from '../protocol/types.js';
 
 export function runProducer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
   const messageToSend = options.message || 'Hello Distributed Systems';
 
-  return new Promise((resolve, reject) => {
-    console.log(`[Producer] Connecting to broker at ${host}:${port}...`);
+  return new Promise((resolve) => {
+    console.log(`[Producer] Connecting to broker at tcp://${host}:${port}...`);
     const socket = net.createConnection({ port, host });
-    const framer = new NDJSONFramer();
+    const framer = new StreamFramer();
 
     socket.on('connect', () => {
       console.log('[Producer] Connected to broker.');
-      const produceCmd = NDJSONFramer.encode({
-        type: 'PRODUCE',
-        message: messageToSend
-      });
+      const reqObj = ProtocolRequest.produce(messageToSend);
+      const produceWire = ProtocolEncoder.encode(reqObj);
 
-      console.log(`[Producer] Sending PRODUCE request: ${produceCmd.trim()}`);
-      socket.write(produceCmd);
+      console.log(`[Producer] Sending PRODUCE request: ${produceWire.trim()}`);
+      socket.write(produceWire);
     });
 
     socket.on('data', (chunk) => {
       const frames = framer.feed(chunk);
       for (const frame of frames) {
         if (frame.error) {
-          console.error('[Producer] Received malformed response:', frame.raw);
+          console.error('[Producer] Framing error on response:', frame.error.message);
+          continue;
+        }
+
+        const decoded = ProtocolDecoder.decode(frame.raw);
+        if (decoded.error) {
+          console.error('[Producer] Decoding error on response:', decoded.error.message);
         } else {
-          console.log('[Producer] Received response from broker:', JSON.stringify(frame.parsed, null, 2));
+          console.log('[Producer] Received response from broker:', JSON.stringify(decoded.parsed, null, 2));
         }
       }
       socket.end(); // Close connection after receiving ACK
@@ -41,12 +48,13 @@ export function runProducer(options = {}) {
 
     socket.on('error', (err) => {
       console.error(`[Producer Error] Could not communicate with broker: ${err.message}`);
-      resolve(); // Graceful exit on network error as per requirements
+      resolve(); // Graceful exit on network error
     });
   });
 }
 
 // Execute directly if run via CLI
-if (process.argv[1] && process.argv[1].endsWith('producer.js')) {
+const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isDirectExecution) {
   runProducer();
 }

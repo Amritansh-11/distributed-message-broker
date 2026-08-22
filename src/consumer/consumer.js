@@ -1,30 +1,40 @@
 import net from 'net';
-import { NDJSONFramer } from '../protocol/message.js';
+import { fileURLToPath } from 'url';
+import { StreamFramer } from '../protocol/framing.js';
+import { ProtocolEncoder, ProtocolDecoder } from '../protocol/codec.js';
+import { ProtocolRequest } from '../protocol/types.js';
 
 export function runConsumer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
 
-  return new Promise((resolve, reject) => {
-    console.log(`[Consumer] Connecting to broker at ${host}:${port}...`);
+  return new Promise((resolve) => {
+    console.log(`[Consumer] Connecting to broker at tcp://${host}:${port}...`);
     const socket = net.createConnection({ port, host });
-    const framer = new NDJSONFramer();
+    const framer = new StreamFramer();
 
     socket.on('connect', () => {
       console.log('[Consumer] Connected to broker.');
-      const consumeCmd = NDJSONFramer.encode({ type: 'CONSUME' });
+      const reqObj = ProtocolRequest.consume();
+      const consumeWire = ProtocolEncoder.encode(reqObj);
 
-      console.log(`[Consumer] Sending CONSUME request: ${consumeCmd.trim()}`);
-      socket.write(consumeCmd);
+      console.log(`[Consumer] Sending CONSUME request: ${consumeWire.trim()}`);
+      socket.write(consumeWire);
     });
 
     socket.on('data', (chunk) => {
       const frames = framer.feed(chunk);
       for (const frame of frames) {
         if (frame.error) {
-          console.error('[Consumer] Received malformed response:', frame.raw);
+          console.error('[Consumer] Framing error on response:', frame.error.message);
+          continue;
+        }
+
+        const decoded = ProtocolDecoder.decode(frame.raw);
+        if (decoded.error) {
+          console.error('[Consumer] Decoding error on response:', decoded.error.message);
         } else {
-          console.log('[Consumer] Received response from broker:', JSON.stringify(frame.parsed, null, 2));
+          console.log('[Consumer] Received response from broker:', JSON.stringify(decoded.parsed, null, 2));
         }
       }
       socket.end(); // Close connection after receiving response
@@ -37,12 +47,13 @@ export function runConsumer(options = {}) {
 
     socket.on('error', (err) => {
       console.error(`[Consumer Error] Could not communicate with broker: ${err.message}`);
-      resolve(); // Graceful exit on network error as per requirements
+      resolve(); // Graceful exit on network error
     });
   });
 }
 
 // Execute directly if run via CLI
-if (process.argv[1] && process.argv[1].endsWith('consumer.js')) {
+const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isDirectExecution) {
   runConsumer();
 }

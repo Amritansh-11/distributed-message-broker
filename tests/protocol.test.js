@@ -1,6 +1,7 @@
 import net from 'net';
-import { Server } from '../src/broker/server.js';
-import { ProtocolParser } from '../src/protocol/parser.js';
+import { BrokerServer } from '../src/broker/server.js';
+import { StreamFramer } from '../src/protocol/framing.js';
+import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
 
 const PORT = 4223;
 const HOST = '127.0.0.1';
@@ -15,80 +16,78 @@ function assert(condition, message) {
 
 async function runProtocolTests() {
   console.log('==================================================');
-  console.log('RUNNING PROTOCOL PARSER VERIFICATION SUITE');
+  console.log('RUNNING PROTOCOL PIPELINE & CHUNKING VERIFICATION SUITE');
   console.log('==================================================\n');
 
-  const server = new Server({ port: PORT, host: HOST });
+  const server = new BrokerServer({ port: PORT, host: HOST });
   await server.start();
 
   try {
-    // Step 1: Create Consumer Client and Subscribe to 'orders'
-    console.log('--- TEST 1: Consumer Connection & Subscription ---');
-    const consumerSocket = net.createConnection({ port: PORT, host: HOST });
-    const consumerParser = new ProtocolParser();
-    const receivedMessages = [];
+    // TEST 1: Connection & PING
+    console.log('--- TEST 1: Connection & PING Request ---');
+    const clientSocket = net.createConnection({ port: PORT, host: HOST });
+    const framer = new StreamFramer();
+    const responses = [];
 
-    consumerSocket.on('data', (chunk) => {
-      consumerParser.feed(chunk);
-    });
-
-    consumerParser.on('command', (cmd) => {
-      if (cmd.type === 'MSG') {
-        console.log(`[Consumer Received] Topic: ${cmd.topic}, ID: ${cmd.messageId}, Payload: "${cmd.payload.toString()}"`);
-        receivedMessages.push(cmd);
+    clientSocket.on('data', (chunk) => {
+      const frames = framer.feed(chunk);
+      for (const frame of frames) {
+        if (!frame.error) {
+          const decoded = ProtocolDecoder.decode(frame.raw);
+          if (!decoded.error) {
+            responses.push(decoded.parsed);
+          }
+        }
       }
     });
 
-    await new Promise((resolve) => consumerSocket.on('connect', resolve));
-    assert(true, 'Consumer connected successfully');
+    await new Promise((resolve) => clientSocket.on('connect', resolve));
+    assert(true, 'Client connected successfully to Broker Server');
 
-    consumerSocket.write('SUB orders\r\n');
+    const pingReq = ProtocolEncoder.encode({ type: 'PING' });
+    clientSocket.write(pingReq);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    assert(true, 'Sent SUB orders command');
 
-    // Step 2: Create Producer Client and Publish Messages
-    console.log('\n--- TEST 2: Producer Connection & Publish ---');
-    const producerSocket = net.createConnection({ port: PORT, host: HOST });
-    await new Promise((resolve) => producerSocket.on('connect', resolve));
-    assert(true, 'Producer connected successfully');
+    assert(responses.length === 1, 'Received response from broker for PING');
+    assert(responses[0].type === 'PONG', 'Received PONG response');
 
-    const payloadStr = JSON.stringify({ id: 101, item: 'Laptop', price: 1200 });
-    const payloadBytes = Buffer.byteLength(payloadStr);
+    // TEST 2: Producer PRODUCE message via pipeline
+    console.log('\n--- TEST 2: Produce Message Over Protocol Pipeline ---');
+    const produceReq = ProtocolEncoder.encode({ type: 'PRODUCE', message: 'Chunked Protocol Test Payload' });
+    clientSocket.write(produceReq);
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
-    console.log('[Test] Producer sending message 1...');
-    producerSocket.write(`PUB orders ${payloadBytes}\r\n${payloadStr}\r\n`);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert(responses.length === 2, 'Received response from broker for PRODUCE');
+    assert(responses[1].type === 'PRODUCE_ACK', 'Received PRODUCE_ACK response');
 
-    // Step 3: Test TCP Packet Chunking (Simulate partial packet transmission)
-    console.log('\n--- TEST 3: TCP Packet Chunking ---');
-    const msg2Payload = 'Chunked Payload Data Stream';
-    const msg2Bytes = Buffer.byteLength(msg2Payload);
-    const fullFrame = `PUB orders ${msg2Bytes}\r\n${msg2Payload}\r\n`;
+    // TEST 3: TCP Packet Chunking (Simulate partial packet transmission over socket)
+    console.log('\n--- TEST 3: TCP Packet Chunking & Buffer Reconstruction ---');
+    const consumeReqStr = ProtocolEncoder.encode({ type: 'CONSUME' });
+    
+    // Split request frame string into 3 separate arbitrary TCP byte chunks
+    const chunk1 = consumeReqStr.slice(0, 5);
+    const chunk2 = consumeReqStr.slice(5, 12);
+    const chunk3 = consumeReqStr.slice(12);
 
-    const chunk1 = fullFrame.slice(0, 10);
-    const chunk2 = fullFrame.slice(10, 25);
-    const chunk3 = fullFrame.slice(25);
-
-    producerSocket.write(chunk1);
+    clientSocket.write(chunk1);
     await new Promise((r) => setTimeout(r, 100));
-    producerSocket.write(chunk2);
+    clientSocket.write(chunk2);
     await new Promise((r) => setTimeout(r, 100));
-    producerSocket.write(chunk3);
+    clientSocket.write(chunk3);
 
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 300));
 
     // Verification
     console.log('\n--- Verification Results ---');
-    assert(receivedMessages.length === 2, 'Both messages were successfully parsed and delivered to consumer!');
-    assert(receivedMessages[0].payload.toString() === payloadStr, 'First message payload matches expected JSON');
-    assert(receivedMessages[1].payload.toString() === msg2Payload, 'Second (chunked) message payload matches expected text');
+    assert(responses.length === 3, 'All 3 pipeline requests successfully received responses!');
+    assert(responses[2].type === 'MESSAGE', 'Third response is MESSAGE response');
+    assert(responses[2].message === 'Chunked Protocol Test Payload', 'Consumed message payload matches chunked PRODUCE');
 
-    consumerSocket.destroy();
-    producerSocket.destroy();
+    clientSocket.destroy();
     await server.stop();
 
     console.log('\n==================================================');
-    console.log('ALL PROTOCOL PARSER TESTS PASSED SUCCESSFULLY! 🎉');
+    console.log('ALL PROTOCOL PIPELINE & CHUNKING TESTS PASSED SUCCESSFULLY! 🎉');
     console.log('==================================================\n');
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);

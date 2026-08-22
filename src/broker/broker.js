@@ -1,126 +1,39 @@
-import net from 'net';
-import { fileURLToPath } from 'url';
-import { NDJSONFramer, ProtocolResponse } from '../protocol/message.js';
+/**
+ * Core MessageBroker Domain Engine
+ * 
+ * Pure domain logic for in-memory message queue storage and retrieval.
+ * Completely decoupled from TCP transport, socket handling, framing, and codecs.
+ */
 
-export class BrokerServer {
-  constructor(port = 5000) {
-    this.port = port;
-    this.messages = []; // In-memory message store for Milestone 1
-    this.server = null;
-    this.connections = new Set();
+import { REQUEST_TYPES, ProtocolResponse } from '../protocol/types.js';
+
+export class MessageBroker {
+  constructor() {
+    /** @type {string[]} In-memory FIFO message queue */
+    this.messages = [];
   }
 
   /**
-   * Starts the TCP Broker server.
-   * @returns {Promise<void>}
+   * Processes a validated protocol request object and returns a response object.
+   * 
+   * @param {{ type: string, message?: string }} request - Validated request object
+   * @param {string} [clientAddr='local'] - Client identifier for diagnostic logging
+   * @returns {object} Response object (PONG, PRODUCE_ACK, MESSAGE, NO_MESSAGES, or ERROR)
    */
-  start() {
-    return new Promise((resolve, reject) => {
-      this.server = net.createServer((socket) => {
-        this._handleConnection(socket);
-      });
+  handleRequest(request, clientAddr = 'local') {
+    const uppercaseType = request.type.toUpperCase();
 
-      this.server.on('error', (err) => {
-        console.error(`[Broker Error] Server error: ${err.message}`);
-        reject(err);
-      });
-
-      this.server.listen(this.port, () => {
-        console.log(`[Broker] TCP Message Broker listening on port ${this.port}`);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Gracefully shuts down the broker and closes all active sockets.
-   * @returns {Promise<void>}
-   */
-  stop() {
-    return new Promise((resolve) => {
-      if (!this.server) return resolve();
-
-      // Close active client sockets
-      for (const socket of this.connections) {
-        socket.destroy();
-      }
-      this.connections.clear();
-
-      this.server.close(() => {
-        console.log('[Broker] Broker server shut down gracefully');
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Handles individual TCP client connection lifecycle and framing.
-   * @param {import('net').Socket} socket 
-   */
-  _handleConnection(socket) {
-    const clientAddr = `${socket.remoteAddress}:${socket.remotePort}`;
-    console.log(`[Broker] Client connected: ${clientAddr}`);
-    
-    this.connections.add(socket);
-    const framer = new NDJSONFramer();
-
-    socket.on('data', (chunk) => {
-      const frames = framer.feed(chunk);
-
-      for (const frame of frames) {
-        if (frame.error) {
-          console.warn(`[Broker] Malformed JSON received from ${clientAddr}: "${frame.raw}"`);
-          if (socket.writable) {
-            socket.write(ProtocolResponse.error('Malformed JSON format'));
-          }
-          continue;
-        }
-
-        const responseStr = this._processRequest(frame.parsed, clientAddr);
-        if (socket.writable) {
-          socket.write(responseStr);
-        }
-      }
-    });
-
-    const cleanup = () => {
-      if (this.connections.has(socket)) {
-        console.log(`[Broker] Client disconnected: ${clientAddr}`);
-        this.connections.delete(socket);
-      }
-    };
-
-    socket.on('close', cleanup);
-    socket.on('error', (err) => {
-      console.error(`[Broker] Socket error on ${clientAddr}: ${err.message}`);
-      cleanup();
-    });
-  }
-
-  /**
-   * Dispatcher for application protocol commands.
-   * @param {object} request 
-   * @param {string} clientAddr 
-   * @returns {string} Encoded NDJSON response string
-   */
-  _processRequest(request, clientAddr) {
-    if (!request || typeof request !== 'object' || !request.type) {
-      return ProtocolResponse.error('Missing or invalid "type" field in request');
-    }
-
-    switch (request.type) {
-      case 'PING':
+    switch (uppercaseType) {
+      case REQUEST_TYPES.PING:
         return ProtocolResponse.pong();
 
-      case 'PRODUCE':
-        if (typeof request.message !== 'string') {
-          return ProtocolResponse.error('PRODUCE request must include a string "message"');
-        }
+      case REQUEST_TYPES.PRODUCE: {
         this.messages.push(request.message);
         console.log(`[Broker] Produced message from ${clientAddr}: "${request.message}" (Queue size: ${this.messages.length})`);
         return ProtocolResponse.produceAck();
+      }
 
-      case 'CONSUME':
+      case REQUEST_TYPES.CONSUME: {
         if (this.messages.length > 0) {
           const msg = this.messages.shift();
           console.log(`[Broker] Consumed message for ${clientAddr}: "${msg}" (Remaining: ${this.messages.length})`);
@@ -129,29 +42,29 @@ export class BrokerServer {
           console.log(`[Broker] CONSUME request from ${clientAddr} (Queue empty)`);
           return ProtocolResponse.noMessages();
         }
+      }
 
       default:
-        console.warn(`[Broker] Unknown request type "${request.type}" from ${clientAddr}`);
-        return ProtocolResponse.error(`Unknown request type "${request.type}"`);
+        console.warn(`[Broker] Unhandled request type "${request.type}" from ${clientAddr}`);
+        return ProtocolResponse.error(`Unhandled request type "${request.type}"`);
     }
+  }
+
+  /**
+   * Returns current count of queued messages.
+   * @returns {number}
+   */
+  getQueueSize() {
+    return this.messages.length;
+  }
+
+  /**
+   * Resets in-memory queue.
+   */
+  clear() {
+    this.messages = [];
   }
 }
 
-// Start broker if executed directly
-const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
-if (isDirectExecution) {
-  const broker = new BrokerServer(5000);
-  broker.start().catch((err) => {
-    console.error('Failed to start broker:', err);
-    process.exit(1);
-  });
-
-  const shutdown = async () => {
-    console.log('\n[Broker] Shutting down broker...');
-    await broker.stop();
-    process.exit(0);
-  };
-
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
+// Export BrokerServer from server.js for backward compatibility
+export { BrokerServer } from './server.js';

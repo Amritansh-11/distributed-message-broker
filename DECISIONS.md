@@ -24,3 +24,19 @@ This file logs key architectural decisions, rationale, alternatives considered, 
   - *Pros*: Human readable via `telnet`/`netcat`, zero HTTP overhead, streaming framing support, non-blocking I/O.
   - *Cons*: Slightly higher byte overhead compared to pure binary packed formats (Protobuf/FlatBuffers), single-threaded JS event loop requires clustering/worker threads for multi-core scaling.
 
+---
+
+## ADR-002: Modular Multi-Layer TCP Protocol Pipeline (Milestone 2)
+- **Status**: Accepted
+- **Context**: Milestone 1 coupled socket handling, buffer framing, request parsing, and array storage in monolithic classes. Milestone 2 requires a robust, reusable protocol layer beneath the broker.
+- **Options Considered**:
+  1. Monolithic socket handler with embedded JSON parsing logic.
+  2. Multi-layer decoupled pipeline: TCP -> StreamFramer -> ProtocolDecoder -> RequestValidator -> MessageBroker -> ProtocolEncoder -> StreamFramer -> TCP.
+- **Decision**: Adopt the multi-layer pipeline architecture.
+  - `StreamFramer`: Pure byte-stream delimiter framing and max frame size security boundaries.
+  - `ProtocolDecoder` & `ProtocolEncoder`: Wire format serialization/deserialization.
+  - `RequestValidator`: Explicit schema and validation layer returning standard ERROR responses.
+  - `MessageBroker`: Pure domain state engine completely isolated from transport concerns.
+- **Tradeoffs**:
+  - *Pros*: Extreme modularity, high testability (unit testing framing and validator independently without TCP servers), robust error handling and buffer security.
+  - *Cons*: Additional object allocations per request step in JavaScript runtime.

@@ -1,4 +1,4 @@
-# Key System Architecture & TCP Learnings — Milestone 1
+# Key System Architecture & TCP Learnings — Milestone 1 & 2
 
 ## 1. What is TCP?
 Transmission Control Protocol (TCP) is a core transport layer protocol (OSI Layer 4) that provides reliable, ordered, and error-checked delivery of a stream of octets (bytes) between applications running on hosts communicating via an IP network.
@@ -41,52 +41,58 @@ Message framing guarantees that the receiver can reliably reconstruct exact appl
 
 ---
 
-## 6. Why We Chose NDJSON (Line-Delimited JSON)
-For Milestone 1, we selected **NDJSON (Newline-Delimited JSON)**:
+## 6. Why We Chose Line-Delimited Framing (NDJSON)
 - **Simplicity**: Every payload is serialized as JSON followed by a newline delimiter (`\n`).
 - **Human Readability & Debuggability**: Developers can test the server using standard terminal networking utilities like `netcat`, `telnet`, or PowerShell raw sockets.
-- **Decoupled Architecture**: Our `NDJSONFramer` handles buffering and splitting. The core `BrokerServer` only receives fully parsed JavaScript objects. If we migrate to Length-Prefixed binary framing in future milestones, `BrokerServer` logic remains untouched!
+- **Decoupled Architecture**: `StreamFramer` handles buffering and splitting. The core `MessageBroker` engine only receives fully parsed JavaScript objects.
 
 ---
 
-## 7. Producer → Broker Communication Flow
-1. Producer creates socket connection to `127.0.0.1:5000`.
-2. Producer encodes `{ "type": "PRODUCE", "message": "Hello Distributed Systems" }` + `\n`.
+## 7. Milestone 2: Multi-Layer Protocol Pipeline
+In Milestone 2, we separated concerns into distinct pipeline layers:
+
+1. **StreamFramer (`src/protocol/framing.js`)**: Buffers TCP chunks, extracts complete line frames, enforces frame size limits (1MB default), and clears buffers on un-delimited buffer overflow attacks.
+2. **Protocol Codec (`src/protocol/codec.js`)**:
+   - `ProtocolDecoder`: Deserializes raw wire frames into JavaScript objects and catches JSON syntax errors.
+   - `ProtocolEncoder`: Serializes response/request objects into framed wire payload strings.
+3. **Request Validator (`src/protocol/validator.js`)**: Enforces strict request schema validation rules (checks request object presence, valid type header, non-empty string payload for PRODUCE).
+4. **MessageBroker Domain Engine (`src/broker/broker.js`)**: Pure domain logic operating on validated request objects and returning standard response objects without transport dependencies.
+
+---
+
+## 8. Buffer Safety & Security Boundaries
+Without maximum frame size limits, a malicious client or broken network stream could send gigabytes of data without a newline delimiter, leading to heap out-of-memory crashes (`ERR_STRING_TOO_LONG` / OS OOM kill).
+
+`StreamFramer` mitigates this by:
+- Rejecting frames larger than `maxFrameSize` (default 1MB).
+- Resetting the buffer when an un-delimited payload exceeds memory bounds.
+
+---
+
+## 9. Producer → Broker Communication Flow
+1. Producer creates TCP socket connection to `127.0.0.1:5000`.
+2. Producer encodes `ProtocolRequest.produce("Hello Distributed Systems")`.
 3. Producer writes string to TCP socket.
-4. Broker framing buffer receives chunk, detects `\n`, parses JSON payload, validates request, and pushes `"Hello Distributed Systems"` into in-memory array `this.messages`.
-5. Broker responds with `{ "type": "PRODUCE_ACK", "success": true }` + `\n`.
-6. Producer receives ACK and closes socket (`socket.end()`).
+4. Server pipeline:
+   - `StreamFramer.feed(chunk)` -> extracts frame.
+   - `ProtocolDecoder.decode(frame)` -> parses request object.
+   - `RequestValidator.validate(request)` -> checks schema validity.
+   - `MessageBroker.handleRequest(request)` -> pushes message to queue, returns `PRODUCE_ACK`.
+   - `ProtocolEncoder.encode(response)` -> writes framed string to socket.
+5. Producer receives `PRODUCE_ACK` and closes socket.
 
 ---
 
-## 8. Consumer → Broker Communication Flow
-1. Consumer creates socket connection to `127.0.0.1:5000`.
-2. Consumer encodes `{ "type": "CONSUME" }` + `\n`.
+## 10. Consumer → Broker Communication Flow
+1. Consumer creates TCP socket connection to `127.0.0.1:5000`.
+2. Consumer encodes `ProtocolRequest.consume()`.
 3. Consumer writes string to TCP socket.
-4. Broker processes request:
-   - If `this.messages.length > 0`, it pops/shifts the next message and responds with `{ "type": "MESSAGE", "success": true, "message": "..." }`.
-   - If queue is empty, it responds with `{ "type": "NO_MESSAGES", "success": true }`.
-5. Consumer receives response, prints result, and closes socket.
+4. Server pipeline processes request and returns `MESSAGE` or `NO_MESSAGES`.
+5. Consumer receives response, prints payload, and closes socket.
 
 ---
 
-## 9. In-Memory Message Storage
-In Milestone 1, messages are temporarily stored in a standard JavaScript array (`messages = []`).
-- `PRODUCE` calls `messages.push(msg)` (FIFO enqueue).
-- `CONSUME` calls `messages.shift()` (FIFO dequeue).
-
-This queue lives strictly in heap memory.
-
----
-
-## 10. Connection Disconnects & Error Handling
-- **Socket Disconnect (`close` event)**: Broker tracks active client connections in a `Set`. When a client closes the socket, the broker logs the event and removes the socket reference to prevent memory leaks.
-- **Socket Errors (`error` event)**: Network dropouts or client crashes (e.g. `ECONNRESET`) trigger socket error handlers. Both broker and clients handle socket errors gracefully without terminating the main process unexpectedly.
-- **Malformed Data**: Invalid JSON strings received over TCP are caught by `NDJSONFramer`, logged, and responded to with a `{ "type": "ERROR", ... }` frame.
-
----
-
-## 11. Current Limitations to address in future milestones
+## 11. Current Limitations (Deferred to Future Milestones)
 1. **Volatility**: Data is lost when broker process stops (needs persistent disk log).
 2. **Destructive Reads**: Consuming a message removes it from memory; multiple consumers cannot read the same stream independently (needs topics/offsets).
 3. **Single Point of Failure**: No node replication or clustering.
