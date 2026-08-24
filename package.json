@@ -8,11 +8,15 @@
     "broker": "node src/broker/server.js",
     "producer": "node src/producer/producer.js",
     "consumer": "node src/consumer/consumer.js",
-    "test": "node tests/framing.test.js && node tests/codec.test.js && node tests/broker.test.js && node tests/protocol.test.js",
+    "topic:create": "node src/cli/topic-create.js",
+    "topic:list": "node src/cli/topic-list.js",
+    "test": "node tests/framing.test.js && node tests/codec.test.js && node tests/topic-manager.test.js && node tests/broker.test.js && node tests/protocol.test.js && node tests/multi-topic-integration.test.js",
     "test:framing": "node tests/framing.test.js",
     "test:codec": "node tests/codec.test.js",
+    "test:topic": "node tests/topic-manager.test.js",
     "test:broker": "node tests/broker.test.js",
-    "test:protocol": "node tests/protocol.test.js"
+    "test:protocol": "node tests/protocol.test.js",
+    "test:integration": "node tests/multi-topic-integration.test.js"
   },
   "keywords": [
     "distributed-systems",

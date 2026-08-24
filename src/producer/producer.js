@@ -7,7 +7,8 @@ import { ProtocolRequest } from '../protocol/types.js';
 export function runProducer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
-  const messageToSend = options.message || 'Hello Distributed Systems';
+  const topic = options.topic || process.argv[2] || 'orders';
+  const messageToSend = options.message || process.argv[3] || 'Hello Distributed Systems';
 
   return new Promise((resolve) => {
     console.log(`[Producer] Connecting to broker at tcp://${host}:${port}...`);
@@ -16,7 +17,10 @@ export function runProducer(options = {}) {
 
     socket.on('connect', () => {
       console.log('[Producer] Connected to broker.');
-      const reqObj = ProtocolRequest.produce(messageToSend);
+      console.log(`[Producer] Topic: ${topic}`);
+      console.log(`[Producer] Message: ${messageToSend}`);
+
+      const reqObj = ProtocolRequest.produce(topic, messageToSend);
       const produceWire = ProtocolEncoder.encode(reqObj);
 
       console.log(`[Producer] Sending PRODUCE request: ${produceWire.trim()}`);

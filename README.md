@@ -1,131 +1,214 @@
-# Distributed Message Broker — Milestone 2
+# Distributed Message Broker — Milestone 3
 
 A custom, lightweight, TCP-based distributed message broker built from scratch in Node.js without third-party messaging libraries or HTTP frameworks.
 
-## Milestone 2 Architecture: Robust Message Protocol & TCP Framing
+## Milestone 3 Architecture: Topics & Message Routing
 
-Milestone 2 enhances the TCP communication layer with a decoupled, multi-layer protocol processing pipeline:
+Milestone 3 introduces **Topics** into the message broker architecture. Rather than routing all published messages into a single global queue, messages are explicitly published to and consumed from dedicated, named logical channels called **topics**.
 
 ```
-Producer (TCP Client)
-    ↓
-TCP Connection
-    ↓
-Message Framing (StreamFramer)
-    ↓
-Protocol Encoder/Decoder (ProtocolCodec)
-    ↓
-Request Validation (RequestValidator)
-    ↓
-Broker (MessageBroker Core Engine)
-    ↓
-Protocol Response (ProtocolEncoder)
-    ↓
-Message Framing (StreamFramer)
-    ↓
-TCP Connection
-    ↓
-Consumer (TCP Client)
+Producer (A)              Producer (B)
+    ↓                         ↓
+PRODUCE topic="orders"     PRODUCE topic="payments"
+    ↓                         ↓
+TCP Connection            TCP Connection
+    ↓                         ↓
+StreamFramer → Decoder → Validator → MessageBroker
+                                           ↓
+                                     TopicManager
+                                     ├── Map {
+                                     │     "orders"   => Topic Queue [FIFO]
+                                     │     "payments" => Topic Queue [FIFO]
+                                     │   }
+                                           ↓
+                                Consumer (per topic)
 ```
 
-- **Producer**: Connects over TCP, encodes structured `PRODUCE` request via codec, receives `PRODUCE_ACK`.
-- **Broker**: Decouples TCP handling, framing (`StreamFramer`), decoding (`ProtocolDecoder`), validation (`RequestValidator`), and domain logic (`MessageBroker`). Maintains an in-memory queue (`messages = []`).
-- **Consumer**: Connects over TCP, encodes `CONSUME` request via codec, receives next available `MESSAGE` or `NO_MESSAGES` if queue is empty.
+### What is a Topic?
+A topic is a logical named stream of messages (e.g. `orders`, `payments`, `notifications`, `logs`). 
+- **Logical Message Isolation**: Messages published to `orders` remain completely isolated from messages published to `payments`.
+- **Topic-Specific FIFO Queues**: Each topic maintains its own independent in-memory FIFO queue.
+- **Explicit Topic Creation**: Topics must be created explicitly via `CREATE_TOPIC` before producers can publish or consumers can consume. Attempting to access an unknown topic returns a structured `TOPIC_NOT_FOUND` error.
 
 ---
 
-## TCP & Message Framing
+## Topic Name Rules
+- Must be a string
+- Must not be empty
+- Maximum length: 100 characters
+- Allowed characters: alphanumeric (`a-z`, `A-Z`, `0-9`), hyphen (`-`), underscore (`_`), dot (`.`)
+- Valid examples: `orders`, `payments-v1`, `user_events`, `order.created`, `logs_2026`
+- Invalid examples: `""`, `"topic with spaces"`, `"topic/with/slashes"`
 
-TCP is a stream-oriented transport protocol (`OSI Layer 4`). It treats transmitted data as a continuous byte stream with no intrinsic record boundaries. One `socket.write()` from a client may arrive across multiple `data` events at the server, or multiple `socket.write()` calls may be coalesced into a single `data` chunk.
+---
 
-To delineate discrete application messages, this broker implements a **StreamFramer** with Line-Delimited JSON (NDJSON) and max-frame guardrails:
-- Every wire message is formatted as a single JSON object terminated by a newline (`\n` or `\r\n`).
-- Framing layer accumulates bytes in a connection buffer, splits chunks on newline boundaries, and enforces maximum frame limits (default 1 MB) to prevent buffer overflow attacks.
+## Wire Protocol Examples
 
-### Protocol Wire Examples
-
-#### PING / PONG
-- **Client sends**:
+#### 1. CREATE_TOPIC
+- **Request**:
   ```json
-  {"type":"PING"}
+  {
+    "requestId": "req-101",
+    "type": "CREATE_TOPIC",
+    "payload": {
+      "topic": "orders"
+    }
+  }
   ```
-- **Broker responds**:
+- **Response**:
   ```json
-  {"type":"PONG","success":true}
-  ```
-
-#### PRODUCE
-- **Client sends**:
-  ```json
-  {"type":"PRODUCE","message":"Hello Distributed Systems"}
-  ```
-- **Broker responds**:
-  ```json
-  {"type":"PRODUCE_ACK","success":true}
-  ```
-
-#### CONSUME
-- **Client sends**:
-  ```json
-  {"type":"CONSUME"}
-  ```
-- **Broker responds (when message available)**:
-  ```json
-  {"type":"MESSAGE","success":true,"message":"Hello Distributed Systems"}
-  ```
-- **Broker responds (when queue empty)**:
-  ```json
-  {"type":"NO_MESSAGES","success":true}
+  {
+    "requestId": "req-101",
+    "type": "CREATE_TOPIC_ACK",
+    "success": true,
+    "payload": {
+      "topic": "orders"
+    }
+  }
   ```
 
-#### Malformed or Invalid Request
-- **Broker responds**:
+#### 2. LIST_TOPICS
+- **Request**:
   ```json
-  {"type":"ERROR","success":false,"error":"PRODUCE request must include a string \"message\""}
+  {
+    "requestId": "req-102",
+    "type": "LIST_TOPICS",
+    "payload": {}
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "requestId": "req-102",
+    "type": "TOPICS",
+    "success": true,
+    "payload": {
+      "topics": ["orders", "payments"]
+    }
+  }
+  ```
+
+#### 3. PRODUCE
+- **Request**:
+  ```json
+  {
+    "requestId": "req-103",
+    "type": "PRODUCE",
+    "payload": {
+      "topic": "orders",
+      "message": "Order 1001 created"
+    }
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "requestId": "req-103",
+    "type": "PRODUCE_ACK",
+    "success": true,
+    "payload": {
+      "topic": "orders"
+    }
+  }
+  ```
+
+#### 4. CONSUME
+- **Request**:
+  ```json
+  {
+    "requestId": "req-104",
+    "type": "CONSUME",
+    "payload": {
+      "topic": "orders"
+    }
+  }
+  ```
+- **Response (Message Available)**:
+  ```json
+  {
+    "requestId": "req-104",
+    "type": "MESSAGE",
+    "success": true,
+    "payload": {
+      "topic": "orders",
+      "message": "Order 1001 created"
+    }
+  }
+  ```
+- **Response (Queue Empty)**:
+  ```json
+  {
+    "requestId": "req-104",
+    "type": "NO_MESSAGES",
+    "success": true,
+    "payload": {
+      "topic": "orders"
+    }
+  }
+  ```
+
+#### 5. Unknown Topic Error
+- **Response**:
+  ```json
+  {
+    "requestId": "req-105",
+    "type": "ERROR",
+    "success": false,
+    "error": {
+      "code": "TOPIC_NOT_FOUND",
+      "message": "Topic 'unknown' does not exist"
+    }
+  }
   ```
 
 ---
 
-## Getting Started & Installation
-
-### Prerequisites
-- Node.js (v18 or higher recommended)
-
-### Running the Components
+## CLI Usage & Commands
 
 1. **Start the Broker Server**:
    ```bash
-   node src/index.js
+   npm run broker
    ```
    *Listens on TCP port 5000.*
 
-2. **Publish a Message via Producer**:
+2. **Create a Topic**:
    ```bash
-   node src/producer/producer.js
+   npm run topic:create -- orders
+   npm run topic:create -- payments
    ```
-   *Sends "Hello Distributed Systems" and prints PRODUCE_ACK.*
 
-3. **Fetch a Message via Consumer**:
+3. **List Active Topics**:
    ```bash
-   node src/consumer/consumer.js
+   npm run topic:list
    ```
-   *Retrieves "Hello Distributed Systems". Running it again yields NO_MESSAGES.*
 
-4. **Run Automated Test Suite**:
+4. **Produce Message to a Topic**:
    ```bash
-   node tests/framing.test.js
-   node tests/codec.test.js
-   node tests/broker.test.js
-   node tests/protocol.test.js
+   npm run producer -- orders "Order 1001 Created"
+   npm run producer -- payments "Payment 5001 Processed"
+   ```
+
+5. **Consume Message from a Topic**:
+   ```bash
+   npm run consumer -- orders
+   npm run consumer -- payments
+   ```
+
+6. **Run Full Test Suite**:
+   ```bash
+   npm test
    ```
 
 ---
 
-## Milestone 2 Components
+## Core Components
 
-- [framing.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/framing.js) — StreamFramer: TCP buffer accumulation, chunk splitting, and frame size safety enforcement.
-- [codec.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/codec.js) — ProtocolDecoder & ProtocolEncoder: Wire payload serialization & deserialization.
-- [validator.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/validator.js) — RequestValidator: Request schema and parameter boundary validation.
-- [types.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/types.js) — Protocol constants and object builders.
-- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — MessageBroker domain engine.
-- [server.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/server.js) — BrokerServer TCP transport listener.
+- [topic-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/topic-manager.js) — TopicManager: Pure domain manager for topic creation, validation, metadata, and isolated FIFO queues.
+- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — MessageBroker domain orchestrator delegating topic operations.
+- [server.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/server.js) — TCP Socket listener handling client connections.
+- [framing.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/framing.js) — StreamFramer: TCP packet chunking and delimiter framing.
+- [codec.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/codec.js) — ProtocolDecoder & ProtocolEncoder: Wire payload serialization.
+- [validator.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/validator.js) — RequestValidator: Request schema and topic validation.
+- [topic-create.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cli/topic-create.js) — CLI helper for topic creation.
+- [topic-list.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cli/topic-list.js) — CLI helper for topic listing.
+

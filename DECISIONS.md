@@ -40,3 +40,21 @@ This file logs key architectural decisions, rationale, alternatives considered, 
 - **Tradeoffs**:
   - *Pros*: Extreme modularity, high testability (unit testing framing and validator independently without TCP servers), robust error handling and buffer security.
   - *Cons*: Additional object allocations per request step in JavaScript runtime.
+
+---
+
+## ADR-003: Introducing Topics Before Partitions (Milestone 3)
+- **Status**: Accepted
+- **Context**: As messaging systems evolve from simple global queues to distributed event logs, we must decide whether to introduce topics or partitions first.
+- **Options Considered**:
+  1. Implement topics and topic-based routing first (logical message isolation).
+  2. Implement topics with automatic partitioning and consumer offsets simultaneously.
+- **Decision**: Implement topics as first-class domain entities before introducing partitions.
+- **Rationale**:
+  - **Logical Domain Modeling**: Topics define the logical domain model for message routing (e.g. `orders` vs `payments`). Understanding logical isolation is a prerequisite for understanding distributed data streams.
+  - **Scalability Mechanism Separation**: Partitions are an underlying physical scalability mechanism used to parallelize throughput across threads or disk segments. Adding partitions before establishing topic routing overcomplicates client contracts prematurely.
+  - **Incremental Architecture**: Establishing `TopicManager` and per-topic FIFO queues provides clean domain boundary abstractions that can be transparently extended to hold multiple partition queues in future milestones.
+- **Tradeoffs**:
+  - *Pros*: Clear architectural boundaries, simpler initial topic contracts, clean isolation testing without partition assignment algorithms.
+  - *Cons*: Total throughput per topic is constrained by a single FIFO queue until partitions are introduced in later milestones.
+

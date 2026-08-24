@@ -92,7 +92,48 @@ Without maximum frame size limits, a malicious client or broken network stream c
 
 ---
 
-## 11. Current Limitations (Deferred to Future Milestones)
-1. **Volatility**: Data is lost when broker process stops (needs persistent disk log).
-2. **Destructive Reads**: Consuming a message removes it from memory; multiple consumers cannot read the same stream independently (needs topics/offsets).
-3. **Single Point of Failure**: No node replication or clustering.
+## 12. Milestone 3: Topics & Message Routing Learnings
+
+### 1. What is a Topic?
+A topic is a named, logical channel or stream of messages within a message broker (e.g. `orders`, `payments`, `notifications`, `logs`). It provides a domain-specific namespace so that producers can categorize messages and consumers can subscribe to specific categories of interest.
+
+### 2. Why Do Message Brokers Need Topics?
+Without topics, all messages produced to a broker land in a single shared global queue. This creates several fundamental problems:
+- **Coupling & Pollution**: A payment worker consuming from the global queue would receive order events, user signups, and log messages, forcing every client to filter out irrelevant data.
+- **Lack of Multi-tenancy**: Different system components cannot operate independently on their own domain streams.
+- **Inflexible Routing**: Brokers use topics as first-class routing keys to deliver published data strictly to interested applications.
+
+### 3. Topic vs. Queue
+- **Single Global Queue**: A monolithic buffer where all producers write and all consumers read. Messages are intermingled regardless of payload domain.
+- **Topic**: A logical category containing an independent, isolated queue for each distinct topic name. Published messages land strictly in their target topic queue.
+
+### 4. How a Message is Routed
+1. **Producer Request**: Producer sends `PRODUCE` request containing `payload.topic` and `payload.message`.
+2. **Validator**: `RequestValidator` validates topic name rules and message presence.
+3. **Broker Domain**: `MessageBroker` queries `TopicManager.hasTopic(topic)`.
+4. **Queue Enqueue**: If topic exists, `TopicManager` routes the message payload into `topics.get(topic).messages.push(message)`.
+5. **Ack**: Broker returns `PRODUCE_ACK` confirming delivery to that specific topic.
+
+### 5. How Topic Isolation Works
+In `TopicManager`, topics are stored internally as a `Map<string, { name: string, messages: Array<any> }>`.
+Because each topic name maps to its own separate JavaScript array buffer:
+- `CONSUME orders` shift-pops exclusively from `topics.get("orders").messages`.
+- `CONSUME payments` shift-pops exclusively from `topics.get("payments").messages`.
+A consumer requesting `orders` can never receive or drain messages belonging to `payments`.
+
+### 6. Why Explicit Topic Creation is Useful
+In our broker, attempting to `PRODUCE` to or `CONSUME` from an uncreated topic returns a `TOPIC_NOT_FOUND` error rather than auto-creating the topic implicitly.
+- **Prevents Typos & Accidental Topics**: A producer with a typo (`PRODUCE topic="oredrs"`) will fail immediately with an explicit error instead of silently creating garbage topics.
+- **Resource Management & Governance**: Administrators have full control over allowed topics, preventing unintended memory allocation.
+
+### 7. FIFO Behavior Inside a Topic
+First-In, First-Out (FIFO) ordering is strictly preserved **within each individual topic**.
+- Messages pushed to `orders` (e.g. Order 1, Order 2, Order 3) are appended to `orders.messages`.
+- Consuming from `orders` retrieves Order 1 first, then Order 2, then Order 3 in exact publish sequence.
+- Cross-topic arrival order does not impact intra-topic FIFO order.
+
+### 8. Why Partitions Are NOT Implemented Yet
+Partitions are a **scalability and parallelism mechanism** (splitting a single topic across multiple logs/nodes to allow parallel consumption). 
+- Before scaling a message stream across partitions, we must establish the **logical message model** (topics and routing) first.
+- Introducing topics in Milestone 3 establishes clean domain isolation and routing contracts before partitioning and offset tracking are added in subsequent milestones.
+

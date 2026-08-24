@@ -12,7 +12,7 @@ function assert(condition, message) {
 
 async function runTests() {
   console.log('==================================================');
-  console.log('RUNNING MILESTONE 2 BROKER PIPELINE VERIFICATION SUITE');
+  console.log('RUNNING MILESTONE 3 BROKER PIPELINE VERIFICATION SUITE');
   console.log('==================================================\n');
 
   const testPort = 5002;
@@ -55,47 +55,74 @@ async function runTests() {
 
     // TEST 2: PING / PONG
     console.log('\n--- TEST 2: PING / PONG ---');
-    const pingRes = await sendCommand({ type: 'PING' });
+    const pingRes = await sendCommand({ requestId: 'req-ping', type: 'PING' });
     assert(pingRes && pingRes.parsed && pingRes.parsed.type === 'PONG', 'Broker responds to PING with PONG');
     assert(pingRes.parsed.success === true, 'PONG indicates success: true');
+    assert(pingRes.parsed.requestId === 'req-ping', 'PONG preserves requestId');
 
-    // TEST 3: Produce Message
-    console.log('\n--- TEST 3: Produce Message ---');
-    const produceRes = await sendCommand({ type: 'PRODUCE', message: 'Hello Distributed Systems' });
+    // TEST 3: Create Topic
+    console.log('\n--- TEST 3: Create Topic ---');
+    const createRes = await sendCommand({ requestId: 'req-1', type: 'CREATE_TOPIC', payload: { topic: 'orders' } });
+    assert(createRes && createRes.parsed && createRes.parsed.type === 'CREATE_TOPIC_ACK', 'Broker responds with CREATE_TOPIC_ACK');
+    assert(createRes.parsed.success === true, 'CREATE_TOPIC_ACK indicates success');
+    assert(createRes.parsed.payload.topic === 'orders', 'Ack payload contains topic name');
+
+    // TEST 4: Produce to Unknown Topic (Fails)
+    console.log('\n--- TEST 4: Produce to Unknown Topic ---');
+    const produceUnknownRes = await sendCommand({ requestId: 'req-2', type: 'PRODUCE', payload: { topic: 'unknown', message: 'Test' } });
+    assert(produceUnknownRes && produceUnknownRes.parsed && produceUnknownRes.parsed.type === 'ERROR', 'Produce to unknown topic returns ERROR');
+    assert(produceUnknownRes.parsed.error.code === 'TOPIC_NOT_FOUND', 'Error code is TOPIC_NOT_FOUND');
+
+    // TEST 5: Produce Message to Existing Topic
+    console.log('\n--- TEST 5: Produce Message to Existing Topic ---');
+    const produceRes = await sendCommand({ requestId: 'req-3', type: 'PRODUCE', payload: { topic: 'orders', message: 'Hello Distributed Systems' } });
     assert(produceRes && produceRes.parsed && produceRes.parsed.type === 'PRODUCE_ACK', 'Broker responds with PRODUCE_ACK');
     assert(produceRes.parsed.success === true, 'PRODUCE_ACK indicates success');
-    assert(broker.messages.length === 1, 'Broker stores message in in-memory queue');
+    assert(broker.topicManager.getTopicInfo('orders').messageCount === 1, 'Broker stores message in topic queue');
 
-    // TEST 4: Consume Message (Message exists)
-    console.log('\n--- TEST 4: Consume Message ---');
-    const consumeRes1 = await sendCommand({ type: 'CONSUME' });
+    // TEST 6: Consume Message (Message exists)
+    console.log('\n--- TEST 6: Consume Message from Topic ---');
+    const consumeRes1 = await sendCommand({ requestId: 'req-4', type: 'CONSUME', payload: { topic: 'orders' } });
     assert(consumeRes1 && consumeRes1.parsed && consumeRes1.parsed.type === 'MESSAGE', 'Broker responds with MESSAGE');
-    assert(consumeRes1.parsed.message === 'Hello Distributed Systems', 'Consumer receives "Hello Distributed Systems"');
+    assert(consumeRes1.parsed.payload.message === 'Hello Distributed Systems', 'Consumer receives "Hello Distributed Systems"');
 
-    // TEST 5: Consume Message (No message exists)
-    console.log('\n--- TEST 5: Consume when Queue is Empty ---');
-    const consumeRes2 = await sendCommand({ type: 'CONSUME' });
+    // TEST 7: Consume Message (No message exists)
+    console.log('\n--- TEST 7: Consume when Queue is Empty ---');
+    const consumeRes2 = await sendCommand({ requestId: 'req-5', type: 'CONSUME', payload: { topic: 'orders' } });
     assert(consumeRes2 && consumeRes2.parsed && consumeRes2.parsed.type === 'NO_MESSAGES', 'Broker responds with NO_MESSAGES');
     assert(consumeRes2.parsed.success === true, 'NO_MESSAGES indicates success');
 
-    // TEST 6: Malformed JSON Handling
-    console.log('\n--- TEST 6: Malformed JSON Handling ---');
+    // TEST 8: List Topics
+    console.log('\n--- TEST 8: List Topics ---');
+    await sendCommand({ requestId: 'req-6', type: 'CREATE_TOPIC', payload: { topic: 'payments' } });
+    const listRes = await sendCommand({ requestId: 'req-7', type: 'LIST_TOPICS', payload: {} });
+    assert(listRes && listRes.parsed && listRes.parsed.type === 'TOPICS', 'Broker responds with TOPICS');
+    assert(listRes.parsed.payload.topics.length === 2, 'Returns 2 created topics');
+
+    // TEST 9: Get Topic Info
+    console.log('\n--- TEST 9: Get Topic Info ---');
+    const infoRes = await sendCommand({ requestId: 'req-8', type: 'GET_TOPIC_INFO', payload: { topic: 'orders' } });
+    assert(infoRes && infoRes.parsed && infoRes.parsed.type === 'TOPIC_INFO', 'Broker responds with TOPIC_INFO');
+    assert(infoRes.parsed.payload.messageCount === 0, 'Topic message count is 0');
+
+    // TEST 10: Malformed JSON Handling
+    console.log('\n--- TEST 10: Malformed JSON Handling ---');
     const malformedRes = await sendCommand('{ invalid json string\n');
     assert(malformedRes && malformedRes.parsed && malformedRes.parsed.type === 'ERROR', 'Broker catches malformed JSON and returns ERROR');
     assert(malformedRes.parsed.success === false, 'ERROR response success is false');
     assert(broker.server.listening, 'Broker remains running after handling malformed JSON');
 
-    // TEST 7: Validation Error Handling
-    console.log('\n--- TEST 7: Request Validation Error Handling ---');
-    const validationErrRes = await sendCommand({ type: 'PRODUCE' }); // Missing message
+    // TEST 11: Validation Error Handling
+    console.log('\n--- TEST 11: Request Validation Error Handling ---');
+    const validationErrRes = await sendCommand({ type: 'PRODUCE', payload: { topic: 'orders' } }); // Missing message
     assert(validationErrRes && validationErrRes.parsed && validationErrRes.parsed.type === 'ERROR', 'Broker catches missing message and returns ERROR response');
     assert(validationErrRes.parsed.error.includes('must include a string "message"'), 'Error details explain validation failure');
 
     // Stop Broker for offline test
     await broker.stop();
 
-    // TEST 8: Connection Failure Handling
-    console.log('\n--- TEST 8: Connection Failure Handling ---');
+    // TEST 12: Connection Failure Handling
+    console.log('\n--- TEST 12: Connection Failure Handling ---');
     let connectionFailedGracefully = false;
     await new Promise((resolve) => {
       const socket = net.createConnection({ port: testPort, host: '127.0.0.1' });
@@ -107,7 +134,7 @@ async function runTests() {
     assert(connectionFailedGracefully, 'Client connection failure caught without unhandled process crash');
 
     console.log('\n==================================================');
-    console.log('ALL MILESTONE 2 BROKER PIPELINE TESTS PASSED SUCCESSFULLY! 🎉');
+    console.log('ALL MILESTONE 3 BROKER PIPELINE TESTS PASSED SUCCESSFULLY! 🎉');
     console.log('==================================================\n');
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);
@@ -117,3 +144,4 @@ async function runTests() {
 }
 
 runTests();
+

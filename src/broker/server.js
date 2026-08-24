@@ -141,10 +141,10 @@ export class BrokerServer {
   }
 
   /**
-   * Helper accessor to access messages directly in tests
+   * Helper accessor to access topicManager directly in tests
    */
-  get messages() {
-    return this.broker.messages;
+  get topicManager() {
+    return this.broker.topicManager;
   }
 }
 

@@ -4,15 +4,28 @@
 A lightweight, high-performance distributed message broker designed for asynchronous event-driven messaging across microservices.
 
 ```
-+------------------+          +------------------------+          +------------------+
-|     Producer     |  ----->  | Distributed Broker Node|  ----->  |     Consumer     |
-| (Publish Event)  |   TCP    |  (In-Memory Store / Log)|   TCP    | (Consume Event)  |
-+------------------+          +------------------------+          +------------------+
+Producer (Publish Event)
+    ↓
+TCP Socket
+    ↓
+Broker Server (server.js)
+    ↓
+Protocol Layer (framing → codec → validator)
+    ↓
+MessageBroker (broker.js)
+    ↓
+TopicManager (topic-manager.js)
+    ↓
+Topic Entity
+    ↓
+Message Queue [FIFO]
+    ↓
+Consumer (Fetch Event)
 ```
 
-## Milestone 2 Layered Protocol Architecture
+## Milestone 3 Architecture: Topics & Message Routing
 
-Milestone 2 establishes a structured, decoupled, multi-layer protocol pipeline for TCP communication:
+Milestone 3 decouples message queues into dedicated, isolated **Topic** queues managed by `TopicManager`.
 
 ```
                       +-----------------------------------+
@@ -41,30 +54,32 @@ Milestone 2 establishes a structured, decoupled, multi-layer protocol pipeline f
                                         v
                       +-----------------------------------+
                       |     MessageBroker Core Engine     |
-                      | (Pure In-Memory Store Logic)      |
+                      | (Orchestrates Protocol Dispatch)  |
                       +-----------------------------------+
-                                        | (Response Object)
+                                        |
                                         v
                       +-----------------------------------+
-                      |     ProtocolEncoder (Codec)       |
-                      | (Response Object -> Wire Frame)   |
+                      |     TopicManager Domain Entity    |
+                      |   (Topic Lifecycle & Queues)      |
+                      |   Map<string, TopicQueue>         |
                       +-----------------------------------+
-                                        | (Framed String)
-                                        v
-                      +-----------------------------------+
-                      |         TCP Connection            |
-                      |     (socket.write Payload)        |
-                      +-----------------------------------+
+                                   /    |    \
+                        "orders"  /     |     \  "payments"
+                                 v      v      v
+                           [Queue]   [Queue]  [Queue]
 ```
 
 ### Module Structure
 
-- `src/protocol/types.js`: Defines request constants (`PING`, `PRODUCE`, `CONSUME`), response constants (`PONG`, `PRODUCE_ACK`, `MESSAGE`, `NO_MESSAGES`, `ERROR`), and request/response object creators.
+- `src/broker/topic-manager.js`: `TopicManager` class for managing topic lifecycle, topic validation, topic listing, deletion safeguards, and isolated FIFO message queues (`Map<string, Topic>`).
+- `src/broker/broker.js`: `MessageBroker` domain orchestrator that receives validated protocol requests and delegates routing to `TopicManager`.
+- `src/broker/server.js`: `BrokerServer` TCP socket transport listener pipeline.
+- `src/protocol/types.js`: Defines request types (`PING`, `CREATE_TOPIC`, `LIST_TOPICS`, `GET_TOPIC_INFO`, `DELETE_TOPIC`, `PRODUCE`, `CONSUME`), response types (`PONG`, `CREATE_TOPIC_ACK`, `TOPICS`, `TOPIC_INFO`, `DELETE_TOPIC_ACK`, `PRODUCE_ACK`, `MESSAGE`, `NO_MESSAGES`, `ERROR`), and object builders.
 - `src/protocol/framing.js`: `StreamFramer` class for stream byte accumulation, frame boundary extraction, partial frame handling, and max frame size limit enforcement.
-- `src/protocol/codec.js`: `ProtocolDecoder` (deserializes wire strings into request objects) and `ProtocolEncoder` (serializes response/request objects into framed wire strings).
-- `src/protocol/validator.js`: `RequestValidator` for enforcing request object structure, command type validation, and message string constraints before reaching broker logic.
-- `src/broker/broker.js`: `MessageBroker` domain engine class containing pure message queue storage/retrieval logic.
-- `src/broker/server.js`: `BrokerServer` TCP listener connecting TCP sockets to the multi-layer protocol pipeline.
-- `src/producer/producer.js`: Producer client operating through the protocol framing and codec layer.
-- `src/consumer/consumer.js`: Consumer client operating through the protocol framing and codec layer.
-- `src/index.js`: Main server execution entry point.
+- `src/protocol/codec.js`: `ProtocolDecoder` and `ProtocolEncoder` for JSON serialization/deserialization.
+- `src/protocol/validator.js`: `RequestValidator` enforcing request schema boundaries, topic validation rules, and string message checks.
+- `src/cli/topic-create.js`: CLI script for sending `CREATE_TOPIC` requests.
+- `src/cli/topic-list.js`: CLI script for sending `LIST_TOPICS` requests.
+- `src/producer/producer.js`: Producer CLI client sending topic-routed `PRODUCE` requests.
+- `src/consumer/consumer.js`: Consumer CLI client sending topic-routed `CONSUME` requests.
+

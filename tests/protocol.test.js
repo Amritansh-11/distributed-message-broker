@@ -51,18 +51,27 @@ async function runProtocolTests() {
     assert(responses.length === 1, 'Received response from broker for PING');
     assert(responses[0].type === 'PONG', 'Received PONG response');
 
-    // TEST 2: Producer PRODUCE message via pipeline
-    console.log('\n--- TEST 2: Produce Message Over Protocol Pipeline ---');
-    const produceReq = ProtocolEncoder.encode({ type: 'PRODUCE', message: 'Chunked Protocol Test Payload' });
+    // TEST 2: Create Topic
+    console.log('\n--- TEST 2: Create Topic ---');
+    const createTopicReq = ProtocolEncoder.encode({ type: 'CREATE_TOPIC', payload: { topic: 'orders' } });
+    clientSocket.write(createTopicReq);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    assert(responses.length === 2, 'Received response from broker for CREATE_TOPIC');
+    assert(responses[1].type === 'CREATE_TOPIC_ACK', 'Received CREATE_TOPIC_ACK response');
+
+    // TEST 3: Producer PRODUCE message via pipeline
+    console.log('\n--- TEST 3: Produce Message Over Protocol Pipeline ---');
+    const produceReq = ProtocolEncoder.encode({ type: 'PRODUCE', payload: { topic: 'orders', message: 'Chunked Protocol Test Payload' } });
     clientSocket.write(produceReq);
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    assert(responses.length === 2, 'Received response from broker for PRODUCE');
-    assert(responses[1].type === 'PRODUCE_ACK', 'Received PRODUCE_ACK response');
+    assert(responses.length === 3, 'Received response from broker for PRODUCE');
+    assert(responses[2].type === 'PRODUCE_ACK', 'Received PRODUCE_ACK response');
 
-    // TEST 3: TCP Packet Chunking (Simulate partial packet transmission over socket)
-    console.log('\n--- TEST 3: TCP Packet Chunking & Buffer Reconstruction ---');
-    const consumeReqStr = ProtocolEncoder.encode({ type: 'CONSUME' });
+    // TEST 4: TCP Packet Chunking (Simulate partial packet transmission over socket)
+    console.log('\n--- TEST 4: TCP Packet Chunking & Buffer Reconstruction ---');
+    const consumeReqStr = ProtocolEncoder.encode({ type: 'CONSUME', payload: { topic: 'orders' } });
     
     // Split request frame string into 3 separate arbitrary TCP byte chunks
     const chunk1 = consumeReqStr.slice(0, 5);
@@ -79,9 +88,9 @@ async function runProtocolTests() {
 
     // Verification
     console.log('\n--- Verification Results ---');
-    assert(responses.length === 3, 'All 3 pipeline requests successfully received responses!');
-    assert(responses[2].type === 'MESSAGE', 'Third response is MESSAGE response');
-    assert(responses[2].message === 'Chunked Protocol Test Payload', 'Consumed message payload matches chunked PRODUCE');
+    assert(responses.length === 4, 'All 4 pipeline requests successfully received responses!');
+    assert(responses[3].type === 'MESSAGE', 'Fourth response is MESSAGE response');
+    assert(responses[3].payload.message === 'Chunked Protocol Test Payload', 'Consumed message payload matches chunked PRODUCE');
 
     clientSocket.destroy();
     await server.stop();
@@ -97,3 +106,4 @@ async function runProtocolTests() {
 }
 
 runProtocolTests();
+

@@ -7,6 +7,7 @@ import { ProtocolRequest } from '../protocol/types.js';
 export function runConsumer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
+  const topic = options.topic || process.argv[2] || 'orders';
 
   return new Promise((resolve) => {
     console.log(`[Consumer] Connecting to broker at tcp://${host}:${port}...`);
@@ -15,10 +16,10 @@ export function runConsumer(options = {}) {
 
     socket.on('connect', () => {
       console.log('[Consumer] Connected to broker.');
-      const reqObj = ProtocolRequest.consume();
+      const reqObj = ProtocolRequest.consume(topic);
       const consumeWire = ProtocolEncoder.encode(reqObj);
 
-      console.log(`[Consumer] Sending CONSUME request: ${consumeWire.trim()}`);
+      console.log(`[Consumer] Sending CONSUME request for topic "${topic}": ${consumeWire.trim()}`);
       socket.write(consumeWire);
     });
 
@@ -34,7 +35,13 @@ export function runConsumer(options = {}) {
         if (decoded.error) {
           console.error('[Consumer] Decoding error on response:', decoded.error.message);
         } else {
-          console.log('[Consumer] Received response from broker:', JSON.stringify(decoded.parsed, null, 2));
+          const res = decoded.parsed;
+          if (res.type === 'MESSAGE' && res.payload) {
+            console.log(`Topic: ${res.payload.topic}`);
+            console.log(`Message: ${res.payload.message}`);
+          } else {
+            console.log('[Consumer] Received response from broker:', JSON.stringify(res, null, 2));
+          }
         }
       }
       socket.end(); // Close connection after receiving response
