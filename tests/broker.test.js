@@ -103,7 +103,7 @@ async function runTests() {
     console.log('\n--- TEST 9: Get Topic Info ---');
     const infoRes = await sendCommand({ requestId: 'req-8', type: 'GET_TOPIC_INFO', payload: { topic: 'orders' } });
     assert(infoRes && infoRes.parsed && infoRes.parsed.type === 'TOPIC_INFO', 'Broker responds with TOPIC_INFO');
-    assert(infoRes.parsed.payload.messageCount === 0, 'Topic message count is 0');
+    assert(infoRes.parsed.payload.messageCount === 1, 'Topic message count is 1 (messages remain stored in log)');
 
     // TEST 10: Malformed JSON Handling
     console.log('\n--- TEST 10: Malformed JSON Handling ---');
@@ -116,7 +116,8 @@ async function runTests() {
     console.log('\n--- TEST 11: Request Validation Error Handling ---');
     const validationErrRes = await sendCommand({ type: 'PRODUCE', payload: { topic: 'orders' } }); // Missing message
     assert(validationErrRes && validationErrRes.parsed && validationErrRes.parsed.type === 'ERROR', 'Broker catches missing message and returns ERROR response');
-    assert(validationErrRes.parsed.error.includes('must include a string "message"'), 'Error details explain validation failure');
+    const errText = typeof validationErrRes.parsed.error === 'string' ? validationErrRes.parsed.error : validationErrRes.parsed.error.message;
+    assert(errText.includes('must include a string "message"'), 'Error details explain validation failure');
 
     // Stop Broker for offline test
     await broker.stop();
@@ -144,4 +145,3 @@ async function runTests() {
 }
 
 runTests();
-

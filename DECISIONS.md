@@ -1,60 +1,49 @@
-# Architecture Decision Records (ADR)
+# Architectural Decision Records (ADR)
 
-This file logs key architectural decisions, rationale, alternatives considered, and tradeoffs made during the project lifecycle.
+## ADR 001: Native Node.js TCP (`net`) Over HTTP / WebSockets
+- **Status**: Accepted
+- **Context**: The message broker requires maximum throughput, minimal network overhead, precise control over framing, and zero third-party dependencies.
+- **Decision**: Use Node.js built-in `net` module to implement custom TCP sockets.
+- **Consequences**: Enables low-latency byte stream handling; requires custom message framing.
 
 ---
 
-## ADR-000: Adoption of Learning-First Development Methodology
+## ADR 002: Line-Delimited JSON (NDJSON) Framing Protocol
 - **Status**: Accepted
-- **Context**: The project will be developed iteratively with explicit conceptual explanations, architectural options, code walkthroughs, testing commands, failure scenarios, and interview questions.
-- **Decision**: Adhere strictly to the 9-step Learning-First process and maintain `ARCHITECTURE.md`, `LEARNING.md`, and `DECISIONS.md`.
+- **Context**: Need a human-readable, simple wire format that supports structured payloads over TCP.
+- **Decision**: Use newline `\n` delimited JSON objects as the application wire protocol.
+- **Consequences**: StreamFramer buffers TCP chunks and splits on `\n`. Messages must not contain unescaped raw newlines.
 
 ---
 
-## ADR-001: Technology Stack & TCP Wire Protocol Choice
+## ADR 003: Pure Domain Engine Decoupled From Network Sockets
 - **Status**: Accepted
-- **Context**: A message broker requires high-concurrency connection handling and ultra-low latency wire protocol parsing without HTTP header overhead.
-- **Options Considered**:
-  1. Node.js (Async Event Loop, `net` module) vs Go vs Python.
-  2. Length-Prefixed Line-Delimited framing (NATS/Redis RESP style) vs JSON-over-TCP vs Binary protocol.
-- **Decision**: 
-  - **Runtime**: Node.js (JavaScript ES Modules) utilizing native `net` socket module.
-  - **Protocol**: Length-prefixed line-delimited wire protocol (`PUB <topic> <bytes>\r\n<payload>\r\n`, `SUB <topic>\r\n`).
-- **Tradeoffs**:
-  - *Pros*: Human readable via `telnet`/`netcat`, zero HTTP overhead, streaming framing support, non-blocking I/O.
-  - *Cons*: Slightly higher byte overhead compared to pure binary packed formats (Protobuf/FlatBuffers), single-threaded JS event loop requires clustering/worker threads for multi-core scaling.
+- **Context**: Network protocol logic should remain isolated from message broker queue operations.
+- **Decision**: Keep `MessageBroker`, `TopicManager`, `Topic`, `Partition`, and `ConsumerGroupManager` pure domain engines that process plain JS objects.
+- **Consequences**: Facilitates unit testing without running active TCP network sockets.
 
 ---
 
-## ADR-002: Modular Multi-Layer TCP Protocol Pipeline (Milestone 2)
+## ADR 004: Explicit Topic Creation Requirement
 - **Status**: Accepted
-- **Context**: Milestone 1 coupled socket handling, buffer framing, request parsing, and array storage in monolithic classes. Milestone 2 requires a robust, reusable protocol layer beneath the broker.
-- **Options Considered**:
-  1. Monolithic socket handler with embedded JSON parsing logic.
-  2. Multi-layer decoupled pipeline: TCP -> StreamFramer -> ProtocolDecoder -> RequestValidator -> MessageBroker -> ProtocolEncoder -> StreamFramer -> TCP.
-- **Decision**: Adopt the multi-layer pipeline architecture.
-  - `StreamFramer`: Pure byte-stream delimiter framing and max frame size security boundaries.
-  - `ProtocolDecoder` & `ProtocolEncoder`: Wire format serialization/deserialization.
-  - `RequestValidator`: Explicit schema and validation layer returning standard ERROR responses.
-  - `MessageBroker`: Pure domain state engine completely isolated from transport concerns.
-- **Tradeoffs**:
-  - *Pros*: Extreme modularity, high testability (unit testing framing and validator independently without TCP servers), robust error handling and buffer security.
-  - *Cons*: Additional object allocations per request step in JavaScript runtime.
+- **Context**: Automatic topic creation can lead to resource leaks and silent typo bugs.
+- **Decision**: Require explicit topic creation via `CREATE_TOPIC`. Return `TOPIC_NOT_FOUND` for unknown topics.
+- **Consequences**: Producers and consumers must interact with existing topics, preventing garbage topics.
 
 ---
 
-## ADR-003: Introducing Topics Before Partitions (Milestone 3)
+## ADR 005: Introduce Partitions Before Consumer Groups
 - **Status**: Accepted
-- **Context**: As messaging systems evolve from simple global queues to distributed event logs, we must decide whether to introduce topics or partitions first.
-- **Options Considered**:
-  1. Implement topics and topic-based routing first (logical message isolation).
-  2. Implement topics with automatic partitioning and consumer offsets simultaneously.
-- **Decision**: Implement topics as first-class domain entities before introducing partitions.
-- **Rationale**:
-  - **Logical Domain Modeling**: Topics define the logical domain model for message routing (e.g. `orders` vs `payments`). Understanding logical isolation is a prerequisite for understanding distributed data streams.
-  - **Scalability Mechanism Separation**: Partitions are an underlying physical scalability mechanism used to parallelize throughput across threads or disk segments. Adding partitions before establishing topic routing overcomplicates client contracts prematurely.
-  - **Incremental Architecture**: Establishing `TopicManager` and per-topic FIFO queues provides clean domain boundary abstractions that can be transparently extended to hold multiple partition queues in future milestones.
-- **Tradeoffs**:
-  - *Pros*: Clear architectural boundaries, simpler initial topic contracts, clean isolation testing without partition assignment algorithms.
-  - *Cons*: Total throughput per topic is constrained by a single FIFO queue until partitions are introduced in later milestones.
+- **Context**: We need to determine whether to build consumer groups or partitions first.
+- **Decision**: Introduce partitions inside topics before consumer groups.
+- **Reason**: Partitions provide the fundamental underlying data structure for parallel message streams, isolated FIFO queues, and key-based routing. Consumer groups, offsets, and partition assignment protocols logically depend on the existence of partitions.
+- **Consequences**: Topics contain `Map<number, Partition>` with default 3 partitions. Enables key-based and round-robin partition routing.
 
+---
+
+## ADR 006: Non-Destructive Monotonic Offsets & Consumer Groups
+- **Status**: Accepted
+- **Context**: Destructive queues where messages are deleted upon consumption prevent multi-consumer group reads and replayability.
+- **Decision**: Store messages in an append-only array per partition with monotonically increasing offsets starting at 0. Maintain consumer groups and offsets in `ConsumerGroupManager`.
+- **Reason**: Enables multiple independent consumer groups to read the same partition stream at their own pace without deleting data. Allows replaying historical data from offset 0.
+- **Consequences**: Messages remain in memory; offset tracking is managed per consumer group via explicit `COMMIT_OFFSET` and auto-advancing read positions.

@@ -8,6 +8,7 @@ export function createTopicCli(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
   const topic = options.topic || process.argv[2] || 'orders';
+  const partitionsArg = options.partitions !== undefined ? options.partitions : (process.argv[3] ? parseInt(process.argv[3], 10) : 3);
 
   return new Promise((resolve) => {
     console.log(`[Topic CLI] Connecting to broker at tcp://${host}:${port}...`);
@@ -15,8 +16,8 @@ export function createTopicCli(options = {}) {
     const framer = new StreamFramer();
 
     socket.on('connect', () => {
-      console.log(`[Topic CLI] Sending CREATE_TOPIC request for "${topic}"...`);
-      const reqObj = ProtocolRequest.createTopic(topic);
+      console.log(`[Topic CLI] Sending CREATE_TOPIC request for "${topic}" with ${partitionsArg} partition(s)...`);
+      const reqObj = ProtocolRequest.createTopic(topic, partitionsArg);
       const wireData = ProtocolEncoder.encode(reqObj);
       socket.write(wireData);
     });

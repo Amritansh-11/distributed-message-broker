@@ -1,13 +1,15 @@
 /**
- * TopicManager — Pure Domain Entity for Broker Topic Lifecycle & Queues
+ * TopicManager — Pure Domain Entity for Broker Topic & Partition Lifecycle
  * 
  * Responsible for creating, listing, deleting, validating, and managing
- * isolated FIFO message queues per topic.
+ * topics, partitions, and offset-based message logs.
  */
+
+import { Topic } from './topic.js';
 
 export class TopicManager {
   constructor() {
-    /** @type {Map<string, { name: string, messages: Array<any> }>} */
+    /** @type {Map<string, Topic>} */
     this.topics = new Map();
   }
 
@@ -39,18 +41,47 @@ export class TopicManager {
   }
 
   /**
-   * Creates a new topic.
+   * Validates partition count against rules:
+   * - Must be an integer
+   * - Range: 1 <= partitions <= 100
+   * 
+   * @param {any} count 
+   * @returns {{ valid: boolean, error?: string }}
+   */
+  static validatePartitionCount(count) {
+    if (typeof count !== 'number' || !Number.isInteger(count)) {
+      return { valid: false, error: 'Partition count must be an integer between 1 and 100' };
+    }
+    if (count < 1 || count > 100) {
+      return { valid: false, error: 'Partition count must be between 1 and 100' };
+    }
+    return { valid: true };
+  }
+
+  /**
+   * Creates a new topic with the specified partition count.
    * 
    * @param {string} name 
-   * @returns {{ success: boolean, topic?: string, code?: string, message?: string }}
+   * @param {number} [partitionCount=3] 
+   * @returns {{ success: boolean, topic?: string, partitions?: number, code?: string, message?: string }}
    */
-  createTopic(name) {
-    const validation = TopicManager.validateTopicName(name);
-    if (!validation.valid) {
+  createTopic(name, partitionCount = 3) {
+    const nameValidation = TopicManager.validateTopicName(name);
+    if (!nameValidation.valid) {
       return {
         success: false,
         code: 'INVALID_TOPIC_NAME',
-        message: validation.error
+        message: nameValidation.error
+      };
+    }
+
+    const countToUse = partitionCount !== undefined && partitionCount !== null ? partitionCount : 3;
+    const partitionValidation = TopicManager.validatePartitionCount(countToUse);
+    if (!partitionValidation.valid) {
+      return {
+        success: false,
+        code: 'INVALID_PARTITION_COUNT',
+        message: partitionValidation.error
       };
     }
 
@@ -62,14 +93,13 @@ export class TopicManager {
       };
     }
 
-    this.topics.set(name, {
-      name,
-      messages: []
-    });
+    const topic = new Topic(name, countToUse);
+    this.topics.set(name, topic);
 
     return {
       success: true,
-      topic: name
+      topic: name,
+      partitions: countToUse
     };
   }
 
@@ -83,26 +113,33 @@ export class TopicManager {
   }
 
   /**
-   * Gets internal topic representation or null.
+   * Gets internal Topic entity or null.
    * @param {string} name 
-   * @returns {{ name: string, messages: Array<any> } | null}
+   * @returns {Topic | null}
    */
   getTopic(name) {
     return this.topics.get(name) || null;
   }
 
   /**
-   * Lists all existing topic names.
-   * @returns {string[]}
+   * Lists all existing topics with partition metadata.
+   * @returns {Array<{ name: string, partitions: number }>}
    */
   listTopics() {
-    return Array.from(this.topics.keys());
+    const list = [];
+    for (const topic of this.topics.values()) {
+      list.push({
+        name: topic.name,
+        partitions: topic.partitionCount
+      });
+    }
+    return list;
   }
 
   /**
-   * Retrieves topic metadata.
+   * Retrieves comprehensive metadata for topic and its partitions.
    * @param {string} name 
-   * @returns {{ success: boolean, topic?: string, messageCount?: number, code?: string, message?: string }}
+   * @returns {{ success: boolean, topic?: string, partitions?: number, messageCount?: number, partitionInfo?: Array<any>, code?: string, message?: string }}
    */
   getTopicInfo(name) {
     if (!this.topics.has(name)) {
@@ -116,9 +153,26 @@ export class TopicManager {
     const topic = this.topics.get(name);
     return {
       success: true,
-      topic: name,
-      messageCount: topic.messages.length
+      ...topic.getInfo()
     };
+  }
+
+  /**
+   * Retrieves metadata for a specific partition within a topic.
+   * @param {string} name 
+   * @param {number} partitionId 
+   */
+  getPartitionInfo(name, partitionId) {
+    if (!this.topics.has(name)) {
+      return {
+        success: false,
+        code: 'TOPIC_NOT_FOUND',
+        message: `Topic '${name}' does not exist`
+      };
+    }
+
+    const topic = this.topics.get(name);
+    return topic.getPartitionInfo(partitionId);
   }
 
   /**
@@ -137,11 +191,12 @@ export class TopicManager {
     }
 
     const topic = this.topics.get(name);
-    if (topic.messages.length > 0 && !force) {
+    const totalMessages = topic.getTotalMessageCount();
+    if (totalMessages > 0 && !force) {
       return {
         success: false,
         code: 'TOPIC_NOT_EMPTY',
-        message: `Cannot delete topic '${name}': topic contains ${topic.messages.length} message(s)`
+        message: `Cannot delete topic '${name}': topic contains ${totalMessages} message(s)`
       };
     }
 
@@ -153,12 +208,14 @@ export class TopicManager {
   }
 
   /**
-   * Enqueues a message into a specific topic queue.
+   * Enqueues a message into a specific topic partition and returns assigned offset.
    * @param {string} name 
    * @param {any} message 
-   * @returns {{ success: boolean, code?: string, message?: string }}
+   * @param {number} [partition] 
+   * @param {string|number} [key] 
+   * @returns {{ success: boolean, partitionId?: number, offset?: number, code?: string, message?: string }}
    */
-  enqueue(name, message) {
+  enqueue(name, message, partition, key) {
     if (!this.topics.has(name)) {
       return {
         success: false,
@@ -168,16 +225,17 @@ export class TopicManager {
     }
 
     const topic = this.topics.get(name);
-    topic.messages.push(message);
-    return { success: true };
+    return topic.enqueue(message, partition, key);
   }
 
   /**
-   * Dequeues a message from a specific topic queue (FIFO).
+   * Reads a message at a specific offset from a topic partition.
    * @param {string} name 
-   * @returns {{ success: boolean, message?: any, code?: string, message?: string }}
+   * @param {number} partition 
+   * @param {number} offset 
+   * @returns {{ success: boolean, partitionId?: number, offset?: number, message?: any, code?: string, message?: string }}
    */
-  dequeue(name) {
+  readOffset(name, partition, offset) {
     if (!this.topics.has(name)) {
       return {
         success: false,
@@ -187,18 +245,26 @@ export class TopicManager {
     }
 
     const topic = this.topics.get(name);
-    if (topic.messages.length === 0) {
+    return topic.readOffset(partition, offset);
+  }
+
+  /**
+   * Dequeues a message from a topic partition (legacy un-grouped consumption).
+   * @param {string} name 
+   * @param {number} [partition] 
+   * @returns {{ success: boolean, message?: any, partitionId?: number, offset?: number, code?: string, message?: string }}
+   */
+  dequeue(name, partition) {
+    if (!this.topics.has(name)) {
       return {
-        success: true,
-        message: null
+        success: false,
+        code: 'TOPIC_NOT_FOUND',
+        message: `Topic '${name}' does not exist`
       };
     }
 
-    const msg = topic.messages.shift();
-    return {
-      success: true,
-      message: msg
-    };
+    const topic = this.topics.get(name);
+    return topic.dequeue(partition);
   }
 
   /**

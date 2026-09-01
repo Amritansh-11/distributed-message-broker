@@ -1,85 +1,88 @@
-# Distributed Message Broker — Architecture Document
+# Distributed Message Broker Architecture — Milestone 5
 
-## System Overview
-A lightweight, high-performance distributed message broker designed for asynchronous event-driven messaging across microservices.
+## Overview
+A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, append-only offset logs, consumer groups with deterministic rebalancing, and pure domain isolation.
 
-```
-Producer (Publish Event)
-    ↓
-TCP Socket
-    ↓
-Broker Server (server.js)
-    ↓
-Protocol Layer (framing → codec → validator)
-    ↓
-MessageBroker (broker.js)
-    ↓
-TopicManager (topic-manager.js)
-    ↓
-Topic Entity
-    ↓
-Message Queue [FIFO]
-    ↓
-Consumer (Fetch Event)
-```
+---
 
-## Milestone 3 Architecture: Topics & Message Routing
-
-Milestone 3 decouples message queues into dedicated, isolated **Topic** queues managed by `TopicManager`.
+## High-Level Pipeline Diagram
 
 ```
-                      +-----------------------------------+
-                      |         TCP Connection            |
-                      |   (Node.js 'net' Socket / Server) |
-                      +-----------------------------------+
-                                        | (Raw Byte Chunks)
-                                        v
-                      +-----------------------------------+
-                      |      StreamFramer (Framing)       |
-                      | (Delimiter Buffer & Boundary Split)|
-                      +-----------------------------------+
-                                        | (Wire Strings)
-                                        v
-                      +-----------------------------------+
-                      |     ProtocolDecoder (Codec)       |
-                      | (Wire String -> Request Object)   |
-                      +-----------------------------------+
-                                        | (Request Object)
-                                        v
-                      +-----------------------------------+
-                      |  RequestValidator (Validation)    |
-                      | (Schema & Field Constraint Checks)|
-                      +-----------------------------------+
-                                        | (Validated Request)
-                                        v
-                      +-----------------------------------+
-                      |     MessageBroker Core Engine     |
-                      | (Orchestrates Protocol Dispatch)  |
-                      +-----------------------------------+
-                                        |
-                                        v
-                      +-----------------------------------+
-                      |     TopicManager Domain Entity    |
-                      |   (Topic Lifecycle & Queues)      |
-                      |   Map<string, TopicQueue>         |
-                      +-----------------------------------+
-                                   /    |    \
-                        "orders"  /     |     \  "payments"
-                                 v      v      v
-                           [Queue]   [Queue]  [Queue]
++-------------------------------------------------------------------------+
+|                              TCP Layer                                  |
+|   net.Server (server.js) <---> net.Socket (Client / Producer / Consumer) |
++-------------------------------------------------------------------------+
+                                   | (Raw Byte Stream)
+                                   v
++-------------------------------------------------------------------------+
+|                          StreamFramer Layer                             |
+|   StreamFramer (framing.js) — Enforces 1MB max frame size & \n delim    |
++-------------------------------------------------------------------------+
+                                   | (Extracted JSON Strings)
+                                   v
++-------------------------------------------------------------------------+
+|                        Protocol Codec Layer                             |
+|   ProtocolDecoder / ProtocolEncoder (codec.js) — JSON Parse / Stringify |
++-------------------------------------------------------------------------+
+                                   | (Parsed Object)
+                                   v
++-------------------------------------------------------------------------+
+|                      Request Validator Layer                            |
+|   RequestValidator (validator.js) — Enforces schemas & partition range |
++-------------------------------------------------------------------------+
+                                   | (Validated Command Object)
+                                   v
++-------------------------------------------------------------------------+
+|                     MessageBroker Orchestrator                          |
+|   MessageBroker (broker.js) — Coordinates domain components              |
++-------------------------------------------------------------------------+
+                  /                                       \
+                 v                                         v
++-----------------------------------+   +----------------------------------+
+|        TopicManager Domain        |   |    ConsumerGroupManager Domain   |
+|  (topic-manager.js)               |   |  (consumer-group-manager.js)     |
+|  - Topics & Partition Management  |   |  - Group membership (JOIN/LEAVE) |
+|  - Append-only log offset reads   |   |  - Round-robin rebalancing       |
++-----------------------------------+   |  - In-memory offset commits      |
+                 |                      |  - Group-based CONSUME           |
+                 v                      +----------------------------------+
++-----------------------------------+                     |
+|           Topic Domain            |                     v
+|  (topic.js)                       |   +----------------------------------+
+|  - Priority Partition Routing     |   |       ConsumerGroup Domain       |
+|  - Map<number, Partition>         |   |  (consumer-group.js)             |
++-----------------------------------+   |  - Active consumers Set          |
+                 |                      |  - Partition assignments Map     |
+                 v                      |  - Committed offsets Map         |
++-----------------------------------+   |  - Transient positions Map       |
+|         Partition Domain          |   +----------------------------------+
+|  (partition.js)                   |
+|  - Append-only log:               |
+|    [{ offset: 0, message }, ...]  |
+|  - Monotonic nextOffset counter   |
++-----------------------------------+
 ```
 
-### Module Structure
+---
 
-- `src/broker/topic-manager.js`: `TopicManager` class for managing topic lifecycle, topic validation, topic listing, deletion safeguards, and isolated FIFO message queues (`Map<string, Topic>`).
-- `src/broker/broker.js`: `MessageBroker` domain orchestrator that receives validated protocol requests and delegates routing to `TopicManager`.
-- `src/broker/server.js`: `BrokerServer` TCP socket transport listener pipeline.
-- `src/protocol/types.js`: Defines request types (`PING`, `CREATE_TOPIC`, `LIST_TOPICS`, `GET_TOPIC_INFO`, `DELETE_TOPIC`, `PRODUCE`, `CONSUME`), response types (`PONG`, `CREATE_TOPIC_ACK`, `TOPICS`, `TOPIC_INFO`, `DELETE_TOPIC_ACK`, `PRODUCE_ACK`, `MESSAGE`, `NO_MESSAGES`, `ERROR`), and object builders.
-- `src/protocol/framing.js`: `StreamFramer` class for stream byte accumulation, frame boundary extraction, partial frame handling, and max frame size limit enforcement.
-- `src/protocol/codec.js`: `ProtocolDecoder` and `ProtocolEncoder` for JSON serialization/deserialization.
-- `src/protocol/validator.js`: `RequestValidator` enforcing request schema boundaries, topic validation rules, and string message checks.
-- `src/cli/topic-create.js`: CLI script for sending `CREATE_TOPIC` requests.
-- `src/cli/topic-list.js`: CLI script for sending `LIST_TOPICS` requests.
-- `src/producer/producer.js`: Producer CLI client sending topic-routed `PRODUCE` requests.
-- `src/consumer/consumer.js`: Consumer CLI client sending topic-routed `CONSUME` requests.
+## Domain Hierarchy
 
+```
+Broker (MessageBroker)
+ ├── TopicManager
+ │    └── Topic ("orders")
+ │         ├── Partition 0 [Log: (offset 0: Order A), (offset 1: Order D)]
+ │         ├── Partition 1 [Log: (offset 0: Order B), (offset 1: Order E)]
+ │         └── Partition 2 [Log: (offset 0: Order C)]
+ │
+ └── ConsumerGroupManager
+      └── ConsumerGroup ("order-workers")
+           ├── Members: ["consumer-1", "consumer-2"]
+           ├── Assignments:
+           │     consumer-1 -> [partition-0, partition-2]
+           │     consumer-2 -> [partition-1]
+           └── Committed Offsets:
+                 "orders:0" -> 1
+                 "orders:1" -> 0
+                 "orders:2" -> 0
+```

@@ -8,6 +8,11 @@ export function runConsumer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
   const topic = options.topic || process.argv[2] || 'orders';
+  let partition = options.partition;
+
+  if (partition === undefined && process.argv[3] !== undefined && /^\d+$/.test(process.argv[3])) {
+    partition = parseInt(process.argv[3], 10);
+  }
 
   return new Promise((resolve) => {
     console.log(`[Consumer] Connecting to broker at tcp://${host}:${port}...`);
@@ -16,7 +21,9 @@ export function runConsumer(options = {}) {
 
     socket.on('connect', () => {
       console.log('[Consumer] Connected to broker.');
-      const reqObj = ProtocolRequest.consume(topic);
+      if (partition !== undefined) console.log(`[Consumer] Consuming specifically from Partition: ${partition}`);
+
+      const reqObj = ProtocolRequest.consume(topic, partition);
       const consumeWire = ProtocolEncoder.encode(reqObj);
 
       console.log(`[Consumer] Sending CONSUME request for topic "${topic}": ${consumeWire.trim()}`);
@@ -38,13 +45,14 @@ export function runConsumer(options = {}) {
           const res = decoded.parsed;
           if (res.type === 'MESSAGE' && res.payload) {
             console.log(`Topic: ${res.payload.topic}`);
+            if (res.payload.partition !== undefined) console.log(`Partition: ${res.payload.partition}`);
             console.log(`Message: ${res.payload.message}`);
           } else {
             console.log('[Consumer] Received response from broker:', JSON.stringify(res, null, 2));
           }
         }
       }
-      socket.end(); // Close connection after receiving response
+      socket.end();
     });
 
     socket.on('close', () => {
@@ -54,12 +62,11 @@ export function runConsumer(options = {}) {
 
     socket.on('error', (err) => {
       console.error(`[Consumer Error] Could not communicate with broker: ${err.message}`);
-      resolve(); // Graceful exit on network error
+      resolve();
     });
   });
 }
 
-// Execute directly if run via CLI
 const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isDirectExecution) {
   runConsumer();

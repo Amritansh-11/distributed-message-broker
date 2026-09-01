@@ -1,102 +1,124 @@
-# Distributed Message Broker — Milestone 3
+# Distributed Message Broker — Milestone 5: Offsets & Consumer Groups
 
 A custom, lightweight, TCP-based distributed message broker built from scratch in Node.js without third-party messaging libraries or HTTP frameworks.
 
-## Milestone 3 Architecture: Topics & Message Routing
+---
 
-Milestone 3 introduces **Topics** into the message broker architecture. Rather than routing all published messages into a single global queue, messages are explicitly published to and consumed from dedicated, named logical channels called **topics**.
+## Milestone 5 Architecture: Offsets & Consumer Groups
+
+Milestone 5 introduces **Kafka-like offsets** and **Consumer Groups**. Messages are stored permanently in an append-only log per partition with monotonically increasing offsets. Consumers can read messages by offset or join isolated consumer groups with deterministic partition assignments and in-memory offset tracking.
 
 ```
-Producer (A)              Producer (B)
-    ↓                         ↓
-PRODUCE topic="orders"     PRODUCE topic="payments"
-    ↓                         ↓
-TCP Connection            TCP Connection
-    ↓                         ↓
-StreamFramer → Decoder → Validator → MessageBroker
-                                           ↓
-                                     TopicManager
-                                     ├── Map {
-                                     │     "orders"   => Topic Queue [FIFO]
-                                     │     "payments" => Topic Queue [FIFO]
-                                     │   }
-                                           ↓
-                                Consumer (per topic)
+Broker
+ ├── orders
+ │    ├── partition-0 [Log: (offset 0: A), (offset 1: D)]
+ │    ├── partition-1 [Log: (offset 0: B), (offset 1: E)]
+ │    └── partition-2 [Log: (offset 0: C)]
+ │
+ └── ConsumerGroupManager
+      ├── "order-workers"
+      │    ├── Members: ["consumer-1", "consumer-2"]
+      │    ├── Partition Assignments: 
+      │    │     consumer-1 -> [partition-0, partition-2]
+      │    │     consumer-2 -> [partition-1]
+      │    └── Committed Offsets:
+      │          partition-0 -> offset 1
+      │          partition-1 -> offset 0
+      │          partition-2 -> offset 0
+      │
+      └── "analytics-workers" (Independent offsets & position)
 ```
-
-### What is a Topic?
-A topic is a logical named stream of messages (e.g. `orders`, `payments`, `notifications`, `logs`). 
-- **Logical Message Isolation**: Messages published to `orders` remain completely isolated from messages published to `payments`.
-- **Topic-Specific FIFO Queues**: Each topic maintains its own independent in-memory FIFO queue.
-- **Explicit Topic Creation**: Topics must be created explicitly via `CREATE_TOPIC` before producers can publish or consumers can consume. Attempting to access an unknown topic returns a structured `TOPIC_NOT_FOUND` error.
 
 ---
 
-## Topic Name Rules
-- Must be a string
-- Must not be empty
-- Maximum length: 100 characters
-- Allowed characters: alphanumeric (`a-z`, `A-Z`, `0-9`), hyphen (`-`), underscore (`_`), dot (`.`)
-- Valid examples: `orders`, `payments-v1`, `user_events`, `order.created`, `logs_2026`
-- Invalid examples: `""`, `"topic with spaces"`, `"topic/with/slashes"`
+## Key Concepts & Architecture
+
+### 1. Monotonic Message Offsets
+- Every produced message receives a unique integer `offset` starting at 0 and incrementing monotonically ($0, 1, 2, \dots$) within its partition.
+- Offsets are unique per partition and independent between partitions.
+
+### 2. Append-Only Partition Log
+- Consuming a message **does not delete it** from the broker.
+- Messages remain permanently stored in memory, allowing repeated offset reads by multiple consumers and independent groups.
+
+### 3. Consumer Groups & Membership
+- **`JOIN_GROUP`**: Registers a consumer (`consumerId`) into a consumer group (`groupId`).
+- **`LEAVE_GROUP`**: Unregisters a consumer from a group.
+- **Deterministic Rebalancing**: When members join or leave, partition assignments are recalculated round-robin across consumers ordered alphabetically by `consumerId`. Each partition is owned by at most 1 consumer per group.
+
+### 4. Group Offsets & Position Tracking
+- **`COMMIT_OFFSET`**: Persists a consumer group's committed offset for a specific topic/partition in memory.
+- **Group-Based CONSUME**: Automatically tracks transient read position per consumer group, fetching un-consumed messages and advancing position without auto-committing.
 
 ---
 
 ## Wire Protocol Examples
 
-#### 1. CREATE_TOPIC
+#### 1. PRODUCE (With Offset Response)
 - **Request**:
   ```json
   {
     "requestId": "req-101",
-    "type": "CREATE_TOPIC",
-    "payload": {
-      "topic": "orders"
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-101",
-    "type": "CREATE_TOPIC_ACK",
-    "success": true,
-    "payload": {
-      "topic": "orders"
-    }
-  }
-  ```
-
-#### 2. LIST_TOPICS
-- **Request**:
-  ```json
-  {
-    "requestId": "req-102",
-    "type": "LIST_TOPICS",
-    "payload": {}
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-102",
-    "type": "TOPICS",
-    "success": true,
-    "payload": {
-      "topics": ["orders", "payments"]
-    }
-  }
-  ```
-
-#### 3. PRODUCE
-- **Request**:
-  ```json
-  {
-    "requestId": "req-103",
     "type": "PRODUCE",
     "payload": {
       "topic": "orders",
-      "message": "Order 1001 created"
+      "partition": 0,
+      "message": "Order Created"
+    }
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "requestId": "req-101",
+    "type": "PRODUCE_ACK",
+    "success": true,
+    "payload": {
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0
+    }
+  }
+  ```
+
+#### 2. CONSUME (By Explicit Offset)
+- **Request**:
+  ```json
+  {
+    "requestId": "req-102",
+    "type": "CONSUME",
+    "payload": {
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0
+    }
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "requestId": "req-102",
+    "type": "MESSAGE",
+    "success": true,
+    "payload": {
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0,
+      "message": "Order Created"
+    }
+  }
+  ```
+
+#### 3. JOIN_GROUP
+- **Request**:
+  ```json
+  {
+    "requestId": "req-103",
+    "type": "JOIN_GROUP",
+    "payload": {
+      "groupId": "order-workers",
+      "consumerId": "consumer-1",
+      "topics": ["orders"]
     }
   }
   ```
@@ -104,26 +126,33 @@ A topic is a logical named stream of messages (e.g. `orders`, `payments`, `notif
   ```json
   {
     "requestId": "req-103",
-    "type": "PRODUCE_ACK",
+    "type": "JOIN_GROUP_ACK",
     "success": true,
     "payload": {
-      "topic": "orders"
+      "groupId": "order-workers",
+      "consumerId": "consumer-1",
+      "assignments": [
+        { "topic": "orders", "partition": 0 },
+        { "topic": "orders", "partition": 2 }
+      ]
     }
   }
   ```
 
-#### 4. CONSUME
+#### 4. GROUP-BASED CONSUME
 - **Request**:
   ```json
   {
     "requestId": "req-104",
     "type": "CONSUME",
     "payload": {
+      "groupId": "order-workers",
+      "consumerId": "consumer-1",
       "topic": "orders"
     }
   }
   ```
-- **Response (Message Available)**:
+- **Response**:
   ```json
   {
     "requestId": "req-104",
@@ -131,84 +160,101 @@ A topic is a logical named stream of messages (e.g. `orders`, `payments`, `notif
     "success": true,
     "payload": {
       "topic": "orders",
-      "message": "Order 1001 created"
-    }
-  }
-  ```
-- **Response (Queue Empty)**:
-  ```json
-  {
-    "requestId": "req-104",
-    "type": "NO_MESSAGES",
-    "success": true,
-    "payload": {
-      "topic": "orders"
+      "partition": 0,
+      "offset": 0,
+      "message": "Order Created"
     }
   }
   ```
 
-#### 5. Unknown Topic Error
+#### 5. COMMIT_OFFSET
+- **Request**:
+  ```json
+  {
+    "requestId": "req-105",
+    "type": "COMMIT_OFFSET",
+    "payload": {
+      "groupId": "order-workers",
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0
+    }
+  }
+  ```
 - **Response**:
   ```json
   {
     "requestId": "req-105",
-    "type": "ERROR",
-    "success": false,
-    "error": {
-      "code": "TOPIC_NOT_FOUND",
-      "message": "Topic 'unknown' does not exist"
+    "type": "COMMIT_OFFSET_ACK",
+    "success": true,
+    "payload": {
+      "groupId": "order-workers",
+      "topic": "orders",
+      "partition": 0,
+      "offset": 0
+    }
+  }
+  ```
+
+#### 6. GET_GROUP_INFO
+- **Request**:
+  ```json
+  {
+    "requestId": "req-106",
+    "type": "GET_GROUP_INFO",
+    "payload": {
+      "groupId": "order-workers"
+    }
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "requestId": "req-106",
+    "type": "GROUP_INFO",
+    "success": true,
+    "payload": {
+      "groupId": "order-workers",
+      "consumers": ["consumer-1"],
+      "assignments": {
+        "consumer-1": [
+          { "topic": "orders", "partition": 0 },
+          { "topic": "orders", "partition": 1 },
+          { "topic": "orders", "partition": 2 }
+        ]
+      },
+      "committedOffsets": [
+        { "topic": "orders", "partition": 0, "offset": 0 }
+      ]
     }
   }
   ```
 
 ---
 
-## CLI Usage & Commands
+## CLI & Test Execution
 
-1. **Start the Broker Server**:
+1. **Start Broker Server**:
    ```bash
    npm run broker
    ```
-   *Listens on TCP port 5000.*
 
-2. **Create a Topic**:
-   ```bash
-   npm run topic:create -- orders
-   npm run topic:create -- payments
-   ```
-
-3. **List Active Topics**:
-   ```bash
-   npm run topic:list
-   ```
-
-4. **Produce Message to a Topic**:
-   ```bash
-   npm run producer -- orders "Order 1001 Created"
-   npm run producer -- payments "Payment 5001 Processed"
-   ```
-
-5. **Consume Message from a Topic**:
-   ```bash
-   npm run consumer -- orders
-   npm run consumer -- payments
-   ```
-
-6. **Run Full Test Suite**:
+2. **Run Full Automated Test Suite**:
    ```bash
    npm test
    ```
 
+3. **Run Milestone 5 Offset & Consumer Group Tests**:
+   ```bash
+   npm run test:offset
+   ```
+
 ---
 
-## Core Components
+## Core Components Architecture
 
-- [topic-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/topic-manager.js) — TopicManager: Pure domain manager for topic creation, validation, metadata, and isolated FIFO queues.
-- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — MessageBroker domain orchestrator delegating topic operations.
-- [server.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/server.js) — TCP Socket listener handling client connections.
-- [framing.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/framing.js) — StreamFramer: TCP packet chunking and delimiter framing.
-- [codec.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/codec.js) — ProtocolDecoder & ProtocolEncoder: Wire payload serialization.
-- [validator.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/protocol/validator.js) — RequestValidator: Request schema and topic validation.
-- [topic-create.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cli/topic-create.js) — CLI helper for topic creation.
-- [topic-list.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cli/topic-list.js) — CLI helper for topic listing.
-
+- [partition.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/partition.js) — `Partition`: Append-only log with monotonic offsets.
+- [topic.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/topic.js) — `Topic`: Topic entity managing partitions & offset reads.
+- [consumer-group.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/consumer-group.js) — `ConsumerGroup`: Group membership & offset state.
+- [consumer-group-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/consumer-group-manager.js) — `ConsumerGroupManager`: Rebalancing algorithm & offset commits.
+- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — `MessageBroker`: Request routing coordinator.

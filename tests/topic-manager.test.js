@@ -19,6 +19,7 @@ function runTopicManagerTests() {
     console.log('--- TEST 1: Create Topic ---');
     const createRes1 = manager.createTopic('orders');
     assert(createRes1.success === true, 'Topic "orders" created successfully');
+    assert(createRes1.partitions === 3, 'Topic created with default 3 partitions');
     assert(manager.hasTopic('orders') === true, 'manager.hasTopic("orders") returns true');
 
     // TEST 2: Create duplicate topic
@@ -29,11 +30,12 @@ function runTopicManagerTests() {
 
     // TEST 3: List topics
     console.log('\n--- TEST 3: List Topics ---');
-    manager.createTopic('payments');
-    manager.createTopic('notifications');
+    manager.createTopic('payments', 2);
+    manager.createTopic('notifications', 5);
     const topicsList = manager.listTopics();
     assert(topicsList.length === 3, 'Returns 3 active topics');
-    assert(topicsList.includes('orders') && topicsList.includes('payments') && topicsList.includes('notifications'), 'List contains all created topics');
+    const names = topicsList.map(t => typeof t === 'string' ? t : t.name);
+    assert(names.includes('orders') && names.includes('payments') && names.includes('notifications'), 'List contains all created topics');
 
     // TEST 4: Get topic info
     console.log('\n--- TEST 4: Get Topic Info ---');
@@ -43,6 +45,7 @@ function runTopicManagerTests() {
     assert(info.success === true, 'Get topic info succeeds');
     assert(info.topic === 'orders', 'Topic name matches');
     assert(info.messageCount === 2, 'Message count is 2');
+    assert(info.partitions === 3, 'Partition count is 3');
 
     // TEST 5: Unknown topic
     console.log('\n--- TEST 5: Unknown Topic ---');

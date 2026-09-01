@@ -8,7 +8,21 @@ export function runProducer(options = {}) {
   const port = options.port || 5000;
   const host = options.host || '127.0.0.1';
   const topic = options.topic || process.argv[2] || 'orders';
-  const messageToSend = options.message || process.argv[3] || 'Hello Distributed Systems';
+
+  let partition = options.partition;
+  let key = options.key;
+  let messageToSend = options.message;
+
+  if (messageToSend === undefined) {
+    const arg3 = process.argv[3];
+    const arg4 = process.argv[4];
+    if (arg3 !== undefined && /^\d+$/.test(arg3) && arg4 !== undefined) {
+      partition = parseInt(arg3, 10);
+      messageToSend = arg4;
+    } else {
+      messageToSend = arg3 || 'Hello Distributed Systems';
+    }
+  }
 
   return new Promise((resolve) => {
     console.log(`[Producer] Connecting to broker at tcp://${host}:${port}...`);
@@ -18,9 +32,11 @@ export function runProducer(options = {}) {
     socket.on('connect', () => {
       console.log('[Producer] Connected to broker.');
       console.log(`[Producer] Topic: ${topic}`);
+      if (partition !== undefined) console.log(`[Producer] Explicit Partition: ${partition}`);
+      if (key !== undefined) console.log(`[Producer] Key: ${key}`);
       console.log(`[Producer] Message: ${messageToSend}`);
 
-      const reqObj = ProtocolRequest.produce(topic, messageToSend);
+      const reqObj = ProtocolRequest.produce(topic, messageToSend, partition, key);
       const produceWire = ProtocolEncoder.encode(reqObj);
 
       console.log(`[Producer] Sending PRODUCE request: ${produceWire.trim()}`);
@@ -42,7 +58,7 @@ export function runProducer(options = {}) {
           console.log('[Producer] Received response from broker:', JSON.stringify(decoded.parsed, null, 2));
         }
       }
-      socket.end(); // Close connection after receiving ACK
+      socket.end();
     });
 
     socket.on('close', () => {
@@ -52,12 +68,11 @@ export function runProducer(options = {}) {
 
     socket.on('error', (err) => {
       console.error(`[Producer Error] Could not communicate with broker: ${err.message}`);
-      resolve(); // Graceful exit on network error
+      resolve();
     });
   });
 }
 
-// Execute directly if run via CLI
 const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isDirectExecution) {
   runProducer();
