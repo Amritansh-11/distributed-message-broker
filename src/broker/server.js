@@ -10,25 +10,39 @@ export class BrokerServer {
   /**
    * @param {number | object} [portOrOptions=5000] 
    * @param {string} [host='127.0.0.1'] 
+   * @param {object} [options={}]
    */
-  constructor(portOrOptions = 5000, host = '127.0.0.1') {
+  constructor(portOrOptions = 5000, host = '127.0.0.1', options = {}) {
+    let brokerOptions = {};
     if (typeof portOrOptions === 'object' && portOrOptions !== null) {
       this.port = portOrOptions.port || 5000;
       this.host = portOrOptions.host || '127.0.0.1';
+      brokerOptions = portOrOptions;
     } else {
       this.port = portOrOptions;
       this.host = host;
+      brokerOptions = options;
     }
-    this.broker = new MessageBroker();
+    this.broker = new MessageBroker(brokerOptions);
     this.server = null;
     this.connections = new Set();
   }
 
   /**
-   * Starts the TCP Broker server and binds to port.
+   * Starts the TCP Broker server after completing disk state recovery.
+   * Accepts connections only after state recovery succeeds.
+   * 
    * @returns {Promise<void>}
    */
-  start() {
+  async start() {
+    // Perform disk state recovery before listening for TCP connections
+    try {
+      this.broker.recover();
+    } catch (err) {
+      console.error(`[Broker Server Error] Disk state recovery failed: ${err.message}`);
+      throw err;
+    }
+
     return new Promise((resolve, reject) => {
       this.server = net.createServer((socket) => {
         this._handleConnection(socket);
@@ -169,4 +183,3 @@ if (isDirectExecution) {
 }
 
 export { BrokerServer as Server };
-

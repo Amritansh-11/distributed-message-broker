@@ -1,10 +1,19 @@
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import { BrokerServer } from '../src/broker/server.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
 
 const PORT = 4223;
 const HOST = '127.0.0.1';
+const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-protocol-4223');
+
+function cleanupDataDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 // Simple assertion helper
 function assert(condition, message) {
@@ -19,7 +28,8 @@ async function runProtocolTests() {
   console.log('RUNNING PROTOCOL PIPELINE & CHUNKING VERIFICATION SUITE');
   console.log('==================================================\n');
 
-  const server = new BrokerServer({ port: PORT, host: HOST });
+  cleanupDataDir(TEST_DATA_DIR);
+  const server = new BrokerServer({ port: PORT, host: HOST, dataDir: TEST_DATA_DIR });
   await server.start();
 
   try {
@@ -94,6 +104,7 @@ async function runProtocolTests() {
 
     clientSocket.destroy();
     await server.stop();
+    cleanupDataDir(TEST_DATA_DIR);
 
     console.log('\n==================================================');
     console.log('ALL PROTOCOL PIPELINE & CHUNKING TESTS PASSED SUCCESSFULLY! 🎉');
@@ -101,9 +112,9 @@ async function runProtocolTests() {
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);
     await server.stop();
+    cleanupDataDir(TEST_DATA_DIR);
     process.exit(1);
   }
 }
 
 runProtocolTests();
-

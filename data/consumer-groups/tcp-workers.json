@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "groupId": "tcp-workers",
+  "consumers": [
+    "worker-1"
+  ],
+  "assignments": {
+    "worker-1": [
+      {
+        "topic": "tcp-orders",
+        "partition": 0
+      },
+      {
+        "topic": "tcp-orders",
+        "partition": 1
+      }
+    ]
+  },
+  "committedOffsets": [
+    {
+      "topic": "tcp-orders",
+      "partition": 0,
+      "offset": 0
+    }
+  ]
+}

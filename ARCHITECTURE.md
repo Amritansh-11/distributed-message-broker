@@ -1,7 +1,7 @@
-# Distributed Message Broker Architecture — Milestone 5
+# Distributed Message Broker Architecture — Milestone 6
 
 ## Overview
-A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, append-only offset logs, consumer groups with deterministic rebalancing, and pure domain isolation.
+A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, persistent append-only log segments, crash recovery, consumer groups with deterministic rebalancing, and pure domain isolation.
 
 ---
 
@@ -34,55 +34,46 @@ A lightweight, high-performance distributed message broker implemented in Node.j
                                    v
 +-------------------------------------------------------------------------+
 |                     MessageBroker Orchestrator                          |
-|   MessageBroker (broker.js) — Coordinates domain components              |
+|   MessageBroker (broker.js) — Coordinates domain & storage              |
 +-------------------------------------------------------------------------+
-                  /                                       \
-                 v                                         v
-+-----------------------------------+   +----------------------------------+
-|        TopicManager Domain        |   |    ConsumerGroupManager Domain   |
-|  (topic-manager.js)               |   |  (consumer-group-manager.js)     |
-|  - Topics & Partition Management  |   |  - Group membership (JOIN/LEAVE) |
-|  - Append-only log offset reads   |   |  - Round-robin rebalancing       |
-+-----------------------------------+   |  - In-memory offset commits      |
-                 |                      |  - Group-based CONSUME           |
-                 v                      +----------------------------------+
-+-----------------------------------+                     |
-|           Topic Domain            |                     v
-|  (topic.js)                       |   +----------------------------------+
-|  - Priority Partition Routing     |   |       ConsumerGroup Domain       |
-|  - Map<number, Partition>         |   |  (consumer-group.js)             |
-+-----------------------------------+   |  - Active consumers Set          |
-                 |                      |  - Partition assignments Map     |
-                 v                      |  - Committed offsets Map         |
-+-----------------------------------+   |  - Transient positions Map       |
-|         Partition Domain          |   +----------------------------------+
-|  (partition.js)                   |
-|  - Append-only log:               |
-|    [{ offset: 0, message }, ...]  |
-|  - Monotonic nextOffset counter   |
-+-----------------------------------+
+         /                                 |                              \
+        v                                  v                               v
++-----------------------+     +------------------------+     +--------------------------+
+|  TopicManager Domain  |     |     StorageEngine      |     | ConsumerGroupManager     |
+| (topic-manager.js)    |     | (storage-engine.js)    |     | (consumer-group-manager) |
+| - Topics & Partitions |     | - Disk recovery        |     | - Membership             |
+| - In-memory Log Index |     | - LogSegment rollover  |     | - Rebalance              |
++-----------------------+     | - Group offsets disk   |     | - In-memory Offsets      |
+                              +------------------------+     +--------------------------+
+                                          |
+                                          v
+                              +------------------------+
+                              |      LogSegment        |
+                              |  (000000000000.log)    |
+                              |  - RecordFormat binary |
+                              |  - Crash truncation    |
+                              +------------------------+
 ```
 
 ---
 
-## Domain Hierarchy
+## Data Directory Layout
 
 ```
-Broker (MessageBroker)
- ├── TopicManager
- │    └── Topic ("orders")
- │         ├── Partition 0 [Log: (offset 0: Order A), (offset 1: Order D)]
- │         ├── Partition 1 [Log: (offset 0: Order B), (offset 1: Order E)]
- │         └── Partition 2 [Log: (offset 0: Order C)]
- │
- └── ConsumerGroupManager
-      └── ConsumerGroup ("order-workers")
-           ├── Members: ["consumer-1", "consumer-2"]
-           ├── Assignments:
-           │     consumer-1 -> [partition-0, partition-2]
-           │     consumer-2 -> [partition-1]
-           └── Committed Offsets:
-                 "orders:0" -> 1
-                 "orders:1" -> 0
-                 "orders:2" -> 0
+data/ (configurable dataDir)
+ ├── topics/
+ │    ├── orders/
+ │    │    ├── partition-0/
+ │    │    │    ├── 000000000000.log
+ │    │    │    └── 000000001000.log
+ │    │    ├── partition-1/
+ │    │    │    └── 000000000000.log
+ │    │    └── partition-2/
+ │    │         └── 000000000000.log
+ │    └── payments/
+ │         └── partition-0/
+ │              └── 000000000000.log
+ └── consumer-groups/
+      ├── order-workers.json
+      └── analytics-workers.json
 ```

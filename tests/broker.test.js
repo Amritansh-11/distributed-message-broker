@@ -1,7 +1,17 @@
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import { BrokerServer } from '../src/broker/server.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
+
+const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-broker-5002');
+
+function cleanupDataDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function assert(condition, message) {
   if (!condition) {
@@ -15,8 +25,9 @@ async function runTests() {
   console.log('RUNNING MILESTONE 3 BROKER PIPELINE VERIFICATION SUITE');
   console.log('==================================================\n');
 
+  cleanupDataDir(TEST_DATA_DIR);
   const testPort = 5002;
-  const broker = new BrokerServer(testPort);
+  const broker = new BrokerServer({ port: testPort, host: '127.0.0.1', dataDir: TEST_DATA_DIR });
 
   try {
     // TEST 1: Broker Startup
@@ -121,6 +132,7 @@ async function runTests() {
 
     // Stop Broker for offline test
     await broker.stop();
+    cleanupDataDir(TEST_DATA_DIR);
 
     // TEST 12: Connection Failure Handling
     console.log('\n--- TEST 12: Connection Failure Handling ---');
@@ -140,6 +152,7 @@ async function runTests() {
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);
     await broker.stop();
+    cleanupDataDir(TEST_DATA_DIR);
     process.exit(1);
   }
 }

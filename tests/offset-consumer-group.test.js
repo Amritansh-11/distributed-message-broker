@@ -1,4 +1,6 @@
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import { Partition } from '../src/broker/partition.js';
 import { Topic } from '../src/broker/topic.js';
 import { TopicManager } from '../src/broker/topic-manager.js';
@@ -8,6 +10,14 @@ import { MessageBroker, BrokerServer } from '../src/broker/broker.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
 import { ProtocolRequest } from '../src/protocol/types.js';
+
+const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-offset-5008');
+
+function cleanupDataDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function assert(condition, message) {
   if (!condition) {
@@ -188,7 +198,8 @@ async function runMilestone5Tests() {
 
     // TEST 21: Broker Server TCP Protocol Integration (MILESTONE 5)
     console.log('\n--- TEST 21: Broker Server TCP Integration ---');
-    const brokerServer = new BrokerServer(5008, '127.0.0.1');
+    cleanupDataDir(TEST_DATA_DIR);
+    const brokerServer = new BrokerServer({ port: 5008, host: '127.0.0.1', dataDir: TEST_DATA_DIR });
     await brokerServer.start();
 
     const sendProtocol = (cmdObj) => {
@@ -245,12 +256,14 @@ async function runMilestone5Tests() {
     assert(leaveAck.parsed.type === 'LEAVE_GROUP_ACK', 'Broker returns LEAVE_GROUP_ACK');
 
     await brokerServer.stop();
+    cleanupDataDir(TEST_DATA_DIR);
 
     console.log('\n==================================================');
     console.log('ALL MILESTONE 5 OFFSETS & CONSUMER GROUPS TESTS PASSED! 🎉');
     console.log('==================================================\n');
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);
+    cleanupDataDir(TEST_DATA_DIR);
     process.exit(1);
   }
 }

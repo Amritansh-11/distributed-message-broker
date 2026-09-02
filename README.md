@@ -1,234 +1,77 @@
-# Distributed Message Broker — Milestone 5: Offsets & Consumer Groups
+# Distributed Message Broker — Milestone 6: Persistent Message Storage
 
 A custom, lightweight, TCP-based distributed message broker built from scratch in Node.js without third-party messaging libraries or HTTP frameworks.
 
 ---
 
-## Milestone 5 Architecture: Offsets & Consumer Groups
+## Milestone 6 Architecture: Persistent Storage Engine
 
-Milestone 5 introduces **Kafka-like offsets** and **Consumer Groups**. Messages are stored permanently in an append-only log per partition with monotonically increasing offsets. Consumers can read messages by offset or join isolated consumer groups with deterministic partition assignments and in-memory offset tracking.
+Milestone 6 introduces **disk persistence** for broker message logs and committed consumer group offsets. Messages and offset metadata survive broker restarts and process crashes while keeping storage concerns strictly isolated behind a clean `StorageEngine` abstraction.
 
 ```
 Broker
- ├── orders
- │    ├── partition-0 [Log: (offset 0: A), (offset 1: D)]
- │    ├── partition-1 [Log: (offset 0: B), (offset 1: E)]
- │    └── partition-2 [Log: (offset 0: C)]
+ ├── StorageEngine (dataDir: ./data)
+ │    ├── topics/
+ │    │    ├── orders/
+ │    │    │    ├── partition-0/
+ │    │    │    │    ├── 000000000000.log
+ │    │    │    │    └── 000000001000.log (Segment Rollover)
+ │    │    │    ├── partition-1/
+ │    │    │    └── partition-2/
+ │    │    └── payments/
+ │    └── consumer-groups/
+ │         ├── order-workers.json
+ │         └── analytics-workers.json
  │
- └── ConsumerGroupManager
-      ├── "order-workers"
-      │    ├── Members: ["consumer-1", "consumer-2"]
-      │    ├── Partition Assignments: 
-      │    │     consumer-1 -> [partition-0, partition-2]
-      │    │     consumer-2 -> [partition-1]
-      │    └── Committed Offsets:
-      │          partition-0 -> offset 1
-      │          partition-1 -> offset 0
-      │          partition-2 -> offset 0
-      │
-      └── "analytics-workers" (Independent offsets & position)
+ ├── TopicManager (In-Memory Index & State)
+ └── ConsumerGroupManager (In-Memory Membership & Offsets)
 ```
 
 ---
 
-## Key Concepts & Architecture
+## Persistent Storage Features & Guarantees
 
-### 1. Monotonic Message Offsets
-- Every produced message receives a unique integer `offset` starting at 0 and incrementing monotonically ($0, 1, 2, \dots$) within its partition.
-- Offsets are unique per partition and independent between partitions.
+### 1. Dedicated Storage Engine Abstraction
+- All filesystem I/O operations are isolated within `StorageEngine` (`src/storage/storage-engine.js`), `LogSegment` (`src/storage/segment.js`), and `RecordFormat` (`src/storage/record-format.js`).
+- `MessageBroker` and `BrokerServer` delegate storage persistence during `PRODUCE`, `CREATE_TOPIC`, `COMMIT_OFFSET`, and startup recovery.
 
-### 2. Append-Only Partition Log
-- Consuming a message **does not delete it** from the broker.
-- Messages remain permanently stored in memory, allowing repeated offset reads by multiple consumers and independent groups.
+### 2. Robust Length-Prefixed Binary Record Format
+Each record written to a `.log` segment file has the format:
+```
++-------------------+---------------------------------------------+-----+
+| Length (4 Bytes)  | Payload JSON String                         | \n  |
+| Big-Endian Uint32 | {"offset": 0, "message": "...", "crc": 123} | 1B  |
++-------------------+---------------------------------------------+-----+
+```
+- **Length**: 4-byte unsigned integer specifying exact byte length of JSON payload.
+- **Payload**: JSON containing `offset`, `message`, and `crc` checksum.
+- **`\n`**: Trailing newline byte delimiter for boundary verification.
 
-### 3. Consumer Groups & Membership
-- **`JOIN_GROUP`**: Registers a consumer (`consumerId`) into a consumer group (`groupId`).
-- **`LEAVE_GROUP`**: Unregisters a consumer from a group.
-- **Deterministic Rebalancing**: When members join or leave, partition assignments are recalculated round-robin across consumers ordered alphabetically by `consumerId`. Each partition is owned by at most 1 consumer per group.
+### 3. Log Segment Rollover
+- Partition logs are split into multiple segment files (e.g. `000000000000.log`, `000000001000.log`).
+- Base filename represents the starting offset of the segment padded to 12 digits.
+- Automatically rolls over to a new segment file when `maxMessagesPerSegment` limit is reached.
 
-### 4. Group Offsets & Position Tracking
-- **`COMMIT_OFFSET`**: Persists a consumer group's committed offset for a specific topic/partition in memory.
-- **Group-Based CONSUME**: Automatically tracks transient read position per consumer group, fetching un-consumed messages and advancing position without auto-committing.
+### 4. Crash Recovery & Tail Truncation
+- On broker startup (`server.start()`), `StorageEngine.recoverAllState()` scans all topic partitions and log segments in numerical filename order.
+- Reconstructs in-memory `Partition` message streams and offset counters.
+- If an **incomplete final record** is detected at EOF (e.g. from abrupt power loss), the broker safely truncates the segment at the boundary of the last valid record and preserves all preceding records intact.
+- Rejects startup if mid-file record corruption or invalid checksum is detected.
+
+### 5. Consumer Group Offset Persistence
+- Committed offsets for consumer groups are saved to `data/consumer-groups/<groupId>.json`.
+- Restores committed offset checkpoints on restart so consumers resume processing from their exact committed position.
 
 ---
 
-## Wire Protocol Examples
+## Wire Protocol Summary
 
-#### 1. PRODUCE (With Offset Response)
-- **Request**:
-  ```json
-  {
-    "requestId": "req-101",
-    "type": "PRODUCE",
-    "payload": {
-      "topic": "orders",
-      "partition": 0,
-      "message": "Order Created"
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-101",
-    "type": "PRODUCE_ACK",
-    "success": true,
-    "payload": {
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0
-    }
-  }
-  ```
-
-#### 2. CONSUME (By Explicit Offset)
-- **Request**:
-  ```json
-  {
-    "requestId": "req-102",
-    "type": "CONSUME",
-    "payload": {
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-102",
-    "type": "MESSAGE",
-    "success": true,
-    "payload": {
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0,
-      "message": "Order Created"
-    }
-  }
-  ```
-
-#### 3. JOIN_GROUP
-- **Request**:
-  ```json
-  {
-    "requestId": "req-103",
-    "type": "JOIN_GROUP",
-    "payload": {
-      "groupId": "order-workers",
-      "consumerId": "consumer-1",
-      "topics": ["orders"]
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-103",
-    "type": "JOIN_GROUP_ACK",
-    "success": true,
-    "payload": {
-      "groupId": "order-workers",
-      "consumerId": "consumer-1",
-      "assignments": [
-        { "topic": "orders", "partition": 0 },
-        { "topic": "orders", "partition": 2 }
-      ]
-    }
-  }
-  ```
-
-#### 4. GROUP-BASED CONSUME
-- **Request**:
-  ```json
-  {
-    "requestId": "req-104",
-    "type": "CONSUME",
-    "payload": {
-      "groupId": "order-workers",
-      "consumerId": "consumer-1",
-      "topic": "orders"
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-104",
-    "type": "MESSAGE",
-    "success": true,
-    "payload": {
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0,
-      "message": "Order Created"
-    }
-  }
-  ```
-
-#### 5. COMMIT_OFFSET
-- **Request**:
-  ```json
-  {
-    "requestId": "req-105",
-    "type": "COMMIT_OFFSET",
-    "payload": {
-      "groupId": "order-workers",
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-105",
-    "type": "COMMIT_OFFSET_ACK",
-    "success": true,
-    "payload": {
-      "groupId": "order-workers",
-      "topic": "orders",
-      "partition": 0,
-      "offset": 0
-    }
-  }
-  ```
-
-#### 6. GET_GROUP_INFO
-- **Request**:
-  ```json
-  {
-    "requestId": "req-106",
-    "type": "GET_GROUP_INFO",
-    "payload": {
-      "groupId": "order-workers"
-    }
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "requestId": "req-106",
-    "type": "GROUP_INFO",
-    "success": true,
-    "payload": {
-      "groupId": "order-workers",
-      "consumers": ["consumer-1"],
-      "assignments": {
-        "consumer-1": [
-          { "topic": "orders", "partition": 0 },
-          { "topic": "orders", "partition": 1 },
-          { "topic": "orders", "partition": 2 }
-        ]
-      },
-      "committedOffsets": [
-        { "topic": "orders", "partition": 0, "offset": 0 }
-      ]
-    }
-  }
-  ```
+- `PRODUCE`: Returns `PRODUCE_ACK` with `topic`, `partition`, and assigned `offset` after persisting record to disk.
+- `CONSUME`: Reads message by explicit offset or group position from in-memory stream without deleting persisted record.
+- `JOIN_GROUP`: Registers consumer and returns partition assignments.
+- `LEAVE_GROUP`: Unregisters consumer and triggers group partition rebalance.
+- `COMMIT_OFFSET`: Saves committed offset checkpoint to memory and disk file.
+- `GET_GROUP_INFO`: Returns group metadata, consumer assignments, and committed offsets.
 
 ---
 
@@ -244,17 +87,18 @@ Broker
    npm test
    ```
 
-3. **Run Milestone 5 Offset & Consumer Group Tests**:
+3. **Run Milestone 6 Persistent Storage Tests**:
    ```bash
-   npm run test:offset
+   npm run test:storage
    ```
 
 ---
 
 ## Core Components Architecture
 
-- [partition.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/partition.js) — `Partition`: Append-only log with monotonic offsets.
-- [topic.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/topic.js) — `Topic`: Topic entity managing partitions & offset reads.
-- [consumer-group.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/consumer-group.js) — `ConsumerGroup`: Group membership & offset state.
-- [consumer-group-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/consumer-group-manager.js) — `ConsumerGroupManager`: Rebalancing algorithm & offset commits.
-- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — `MessageBroker`: Request routing coordinator.
+- [storage-engine.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/storage/storage-engine.js) — `StorageEngine`: Root storage coordinator.
+- [segment.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/storage/segment.js) — `LogSegment`: Appends records and manages rollover.
+- [record-format.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/storage/record-format.js) — `RecordFormat`: Binary framing, CRC32, & truncation.
+- [partition.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/partition.js) — `Partition`: Pure domain in-memory log stream.
+- [consumer-group-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/consumer-group-manager.js) — `ConsumerGroupManager`: Consumer group state manager.
+- [server.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/server.js) — `BrokerServer`: TCP socket server executing startup recovery.

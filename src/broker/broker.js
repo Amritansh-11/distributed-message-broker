@@ -1,13 +1,28 @@
 import { REQUEST_TYPES, ProtocolResponse } from '../protocol/types.js';
 import { TopicManager } from './topic-manager.js';
 import { ConsumerGroupManager } from './consumer-group-manager.js';
+import { StorageEngine } from '../storage/storage-engine.js';
 
 export class MessageBroker {
-  constructor() {
+  /**
+   * @param {object} [options={}]
+   * @param {StorageEngine} [options.storageEngine]
+   * @param {object} [options.storageConfig]
+   */
+  constructor(options = {}) {
     /** @type {TopicManager} Domain manager for topic lifecycle, partitions, and message logs */
     this.topicManager = new TopicManager();
     /** @type {ConsumerGroupManager} Domain manager for consumer groups and offsets */
     this.consumerGroupManager = new ConsumerGroupManager(this.topicManager);
+    /** @type {StorageEngine} Persistent Storage Engine */
+    this.storageEngine = options.storageEngine || new StorageEngine(options.storageConfig || options);
+  }
+
+  /**
+   * Recovers state from storage on startup.
+   */
+  recover() {
+    this.storageEngine.recoverAllState(this.topicManager, this.consumerGroupManager);
   }
 
   /**
@@ -47,6 +62,10 @@ export class MessageBroker {
         const partitionsCount = getField('partitions') ?? 3;
         const result = this.topicManager.createTopic(topic, partitionsCount);
         if (result.success) {
+          // Initialize storage directories for each partition
+          for (let p = 0; p < result.partitions; p++) {
+            this.storageEngine.ensurePartitionDir(topic, p);
+          }
           console.log(`[Broker] Created topic "${topic}" with ${result.partitions} partition(s) requested by ${clientAddr}`);
           return ProtocolResponse.createTopicAck(topic, result.partitions, requestId);
         } else {
@@ -108,6 +127,17 @@ export class MessageBroker {
           return ProtocolResponse.error({
             code: enqueueResult.code,
             message: enqueueResult.message
+          }, requestId);
+        }
+
+        // Persist message record to storage log segment
+        try {
+          this.storageEngine.appendMessage(topic, enqueueResult.partitionId, enqueueResult.offset, message);
+        } catch (err) {
+          console.error(`[Broker Storage Error] Failed to persist message to disk: ${err.message}`);
+          return ProtocolResponse.error({
+            code: 'STORAGE_ERROR',
+            message: `Failed to persist message to disk: ${err.message}`
           }, requestId);
         }
 
@@ -199,6 +229,14 @@ export class MessageBroker {
       case REQUEST_TYPES.COMMIT_OFFSET: {
         const result = this.consumerGroupManager.commitOffset(groupId, topic, partition, offset);
         if (result.success) {
+          // Persist group committed offsets checkpoint to storage
+          try {
+            const groupInfoRes = this.consumerGroupManager.getGroupInfo(groupId);
+            this.storageEngine.saveConsumerGroupOffsets(groupId, groupInfoRes);
+          } catch (err) {
+            console.error(`[Broker Storage Error] Failed to persist group offset checkpoint: ${err.message}`);
+          }
+
           console.log(`[Broker] Committed offset ${offset} for group "${groupId}" on "${topic}" partition ${partition} from ${clientAddr}`);
           return ProtocolResponse.commitOffsetAck(groupId, topic, partition, offset, requestId);
         } else {
@@ -245,6 +283,7 @@ export class MessageBroker {
   clear() {
     this.topicManager.clear();
     this.consumerGroupManager.clear();
+    this.storageEngine.close();
   }
 }
 

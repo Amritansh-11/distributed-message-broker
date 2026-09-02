@@ -1,4 +1,6 @@
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import { BrokerServer } from '../src/broker/server.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
@@ -6,6 +8,13 @@ import { ProtocolRequest } from '../src/protocol/types.js';
 
 const PORT = 5006;
 const HOST = '127.0.0.1';
+const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-partition-5006');
+
+function cleanupDataDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 function assert(condition, message) {
   if (!condition) {
@@ -19,7 +28,8 @@ async function runPartitionIntegrationTest() {
   console.log('RUNNING MILESTONE 4 PARTITION ROUTING INTEGRATION SUITE');
   console.log('==================================================\n');
 
-  const broker = new BrokerServer(PORT, HOST);
+  cleanupDataDir(TEST_DATA_DIR);
+  const broker = new BrokerServer({ port: PORT, host: HOST, dataDir: TEST_DATA_DIR });
   await broker.start();
 
   try {
@@ -99,6 +109,7 @@ async function runPartitionIntegrationTest() {
     assert(empty0.parsed.type === 'NO_MESSAGES', 'Consuming partition 0 when empty returns NO_MESSAGES');
 
     await broker.stop();
+    cleanupDataDir(TEST_DATA_DIR);
 
     console.log('\n==================================================');
     console.log('ALL PARTITION ROUTING INTEGRATION TESTS PASSED SUCCESSFULLY! 🎉');
@@ -106,6 +117,7 @@ async function runPartitionIntegrationTest() {
   } catch (err) {
     console.error('\n[TEST FAILURE]', err);
     await broker.stop();
+    cleanupDataDir(TEST_DATA_DIR);
     process.exit(1);
   }
 }
