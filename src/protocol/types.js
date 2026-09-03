@@ -17,7 +17,14 @@ export const REQUEST_TYPES = {
   JOIN_GROUP: 'JOIN_GROUP',
   LEAVE_GROUP: 'LEAVE_GROUP',
   COMMIT_OFFSET: 'COMMIT_OFFSET',
-  GET_GROUP_INFO: 'GET_GROUP_INFO'
+  GET_GROUP_INFO: 'GET_GROUP_INFO',
+  GET_CLUSTER_INFO: 'GET_CLUSTER_INFO',
+  BROKER_HELLO: 'BROKER_HELLO',
+  BROKER_PING: 'BROKER_PING',
+  REPLICATE_RECORD: 'REPLICATE_RECORD',
+  REPLICATE_ACK: 'REPLICATE_ACK',
+  REPLICA_SYNC: 'REPLICA_SYNC',
+  REPLICA_SYNC_RESPONSE: 'REPLICA_SYNC_RESPONSE'
 };
 
 export const RESPONSE_TYPES = {
@@ -34,16 +41,21 @@ export const RESPONSE_TYPES = {
   LEAVE_GROUP_ACK: 'LEAVE_GROUP_ACK',
   COMMIT_OFFSET_ACK: 'COMMIT_OFFSET_ACK',
   GROUP_INFO: 'GROUP_INFO',
+  CLUSTER_INFO: 'CLUSTER_INFO',
+  BROKER_HELLO_ACK: 'BROKER_HELLO_ACK',
+  BROKER_PONG: 'BROKER_PONG',
+  REPLICATE_ACK: 'REPLICATE_ACK',
+  REPLICA_SYNC_RESPONSE: 'REPLICA_SYNC_RESPONSE',
   ERROR: 'ERROR'
 };
 
 export const ProtocolRequest = {
   ping: (requestId) => (requestId ? { requestId, type: REQUEST_TYPES.PING } : { type: REQUEST_TYPES.PING }),
   
-  createTopic: (topic, partitions = 3, requestId) => ({
+  createTopic: (topic, partitions = 3, replicationFactor = 1, requestId) => ({
     ...(requestId && { requestId }),
     type: REQUEST_TYPES.CREATE_TOPIC,
-    payload: { topic, partitions }
+    payload: { topic, partitions, replicationFactor }
   }),
 
   listTopics: (requestId) => ({
@@ -129,6 +141,76 @@ export const ProtocolRequest = {
     payload: {
       groupId
     }
+  }),
+
+  getClusterInfo: (requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.GET_CLUSTER_INFO,
+    payload: {}
+  }),
+
+  brokerHello: (brokerId, host, port, requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.BROKER_HELLO,
+    payload: {
+      brokerId,
+      host,
+      port
+    }
+  }),
+
+  brokerPing: (brokerId, requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.BROKER_PING,
+    payload: {
+      brokerId
+    }
+  }),
+
+  replicateRecord: (topic, partition, offset, message, key = undefined, requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.REPLICATE_RECORD,
+    payload: {
+      topic,
+      partition,
+      offset,
+      message,
+      ...(key !== undefined && key !== null && { key })
+    }
+  }),
+
+  replicateAck: (brokerId, topic, partition, offset, success = true, requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.REPLICATE_ACK,
+    success,
+    payload: {
+      brokerId,
+      topic,
+      partition,
+      offset
+    }
+  }),
+
+  replicaSync: (brokerId, topic, partition, fromOffset = 0, requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.REPLICA_SYNC,
+    payload: {
+      brokerId,
+      topic,
+      partition,
+      fromOffset
+    }
+  }),
+
+  replicaSyncResponse: (topic, partition, records = [], requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.REPLICA_SYNC_RESPONSE,
+    success: true,
+    payload: {
+      topic,
+      partition,
+      records
+    }
   })
 };
 
@@ -139,11 +221,11 @@ export const ProtocolResponse = {
     success: true
   }),
 
-  createTopicAck: (topic, partitions = 3, requestId) => ({
+  createTopicAck: (topic, partitions = 3, replicationFactor = 1, requestId) => ({
     ...(requestId && { requestId }),
     type: RESPONSE_TYPES.CREATE_TOPIC_ACK,
     success: true,
-    payload: { topic, partitions }
+    payload: { topic, partitions, replicationFactor }
   }),
 
   topics: (topicsList, requestId) => ({
@@ -261,6 +343,58 @@ export const ProtocolResponse = {
     type: RESPONSE_TYPES.GROUP_INFO,
     success: true,
     payload: typeof groupInfoObj === 'object' && groupInfoObj.groupId ? groupInfoObj : { groupId: groupInfoObj }
+  }),
+
+  clusterInfo: (brokersList, requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.CLUSTER_INFO,
+    success: true,
+    payload: {
+      brokers: brokersList
+    }
+  }),
+
+  brokerHelloAck: (brokerId, host, port, requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.BROKER_HELLO_ACK,
+    success: true,
+    payload: {
+      brokerId,
+      host,
+      port
+    }
+  }),
+
+  brokerPong: (brokerId, requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.BROKER_PONG,
+    success: true,
+    payload: {
+      brokerId
+    }
+  }),
+
+  replicateAck: (brokerId, topic, partition, offset, requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.REPLICATE_ACK,
+    success: true,
+    payload: {
+      brokerId,
+      topic,
+      partition,
+      offset
+    }
+  }),
+
+  replicaSyncResponse: (topic, partition, records = [], requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.REPLICA_SYNC_RESPONSE,
+    success: true,
+    payload: {
+      topic,
+      partition,
+      records
+    }
   }),
 
   error: (errorPayload, requestId) => ({

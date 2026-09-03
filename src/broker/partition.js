@@ -31,6 +31,38 @@ export class Partition {
   }
 
   /**
+   * Enqueues a message at an explicit leader-assigned offset (for follower replica writes).
+   * Validates against offset payload conflicts.
+   * 
+   * @param {number} offset 
+   * @param {any} message 
+   * @returns {{ offset?: number, message?: any, error?: { code: string, message: string } }}
+   */
+  enqueueWithOffset(offset, message) {
+    if (offset < this.nextOffset) {
+      const existing = this.messages[offset];
+      if (existing) {
+        const exMsgStr = typeof existing.message === 'string' ? existing.message : JSON.stringify(existing.message);
+        const newMsgStr = typeof message === 'string' ? message : JSON.stringify(message);
+        if (exMsgStr === newMsgStr) {
+          return { offset, message };
+        }
+        return {
+          error: {
+            code: 'OFFSET_CONFLICT',
+            message: `Conflicting message at offset ${offset} for partition ${this.id}`
+          }
+        };
+      }
+    }
+
+    const entry = { offset, message };
+    this.messages[offset] = entry;
+    this.nextOffset = Math.max(this.nextOffset, offset + 1);
+    return entry;
+  }
+
+  /**
    * Reads a message at a specific offset without removing it from the log.
    * 
    * @param {number} offset 

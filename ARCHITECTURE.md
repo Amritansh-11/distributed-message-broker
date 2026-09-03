@@ -1,16 +1,49 @@
-# Distributed Message Broker Architecture — Milestone 6
+# Distributed Message Broker Architecture — Milestone 8
 
 ## Overview
-A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, persistent append-only log segments, crash recovery, consumer groups with deterministic rebalancing, and pure domain isolation.
+A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, persistent append-only log segments, crash recovery, consumer groups with deterministic rebalancing, multi-broker cluster topology, inter-broker TCP heartbeats, partition replication across follower brokers (`REPLICATE_RECORD` / `REPLICATE_ACK`), leader write enforcement (`NOT_LEADER` error), High-Water Mark tracking, and follower catch-up sync (`REPLICA_SYNC`).
 
 ---
 
-## High-Level Pipeline Diagram
+## Replication Flow Diagram
+
+```
+                    Producer
+                       |
+                   (PRODUCE)
+                       v
+         +---------------------------+
+         |     Partition Leader      |
+         |        (broker-1)         |
+         |  Append Local Log & Disk  |
+         +---------------------------+
+               /               \
+       (REPLICATE_RECORD)  (REPLICATE_RECORD)
+             /                   \
+            v                     v
++-----------------------+   +-----------------------+
+|   Follower Replica    |   |   Follower Replica    |
+|      (broker-2)       |   |      (broker-3)       |
+| Persist Offset & Disk |   | Persist Offset & Disk |
++-----------------------+   +-----------------------+
+            \                     /
+      (REPLICATE_ACK)       (REPLICATE_ACK)
+             \                   /
+              v                 v
+         +---------------------------+
+         |  Update High-Water Mark   |
+         |    Return PRODUCE_ACK     |
+         +---------------------------+
+```
+
+---
+
+## High-Level Component Layout
 
 ```
 +-------------------------------------------------------------------------+
 |                              TCP Layer                                  |
-|   net.Server (server.js) <---> net.Socket (Client / Producer / Consumer) |
+|   net.Server (server.js) <---> net.Socket (Client / Remote Broker)      |
 +-------------------------------------------------------------------------+
                                    | (Raw Byte Stream)
                                    v
@@ -33,47 +66,13 @@ A lightweight, high-performance distributed message broker implemented in Node.j
                                    | (Validated Command Object)
                                    v
 +-------------------------------------------------------------------------+
-|                     MessageBroker Orchestrator                          |
-|   MessageBroker (broker.js) — Coordinates domain & storage              |
+|                       Server Routing Switch                             |
 +-------------------------------------------------------------------------+
-         /                                 |                              \
-        v                                  v                               v
-+-----------------------+     +------------------------+     +--------------------------+
-|  TopicManager Domain  |     |     StorageEngine      |     | ConsumerGroupManager     |
-| (topic-manager.js)    |     | (storage-engine.js)    |     | (consumer-group-manager) |
-| - Topics & Partitions |     | - Disk recovery        |     | - Membership             |
-| - In-memory Log Index |     | - LogSegment rollover  |     | - Rebalance              |
-+-----------------------+     | - Group offsets disk   |     | - In-memory Offsets      |
-                              +------------------------+     +--------------------------+
-                                          |
-                                          v
-                              +------------------------+
-                              |      LogSegment        |
-                              |  (000000000000.log)    |
-                              |  - RecordFormat binary |
-                              |  - Crash truncation    |
-                              +------------------------+
-```
-
----
-
-## Data Directory Layout
-
-```
-data/ (configurable dataDir)
- ├── topics/
- │    ├── orders/
- │    │    ├── partition-0/
- │    │    │    ├── 000000000000.log
- │    │    │    └── 000000001000.log
- │    │    ├── partition-1/
- │    │    │    └── 000000000000.log
- │    │    └── partition-2/
- │    │         └── 000000000000.log
- │    └── payments/
- │         └── partition-0/
- │              └── 000000000000.log
- └── consumer-groups/
-      ├── order-workers.json
-      └── analytics-workers.json
+           /                           |                           \
+          v                            v                            v
+(BROKER_HELLO/PING)            (REPLICATE/SYNC)              (Client Requests)
+          |                            |                            |
+          v                            v                            v
+  ClusterManager              ReplicationManager              MessageBroker
+(cluster-manager.js)       (replication-manager.js)           (broker.js)
 ```

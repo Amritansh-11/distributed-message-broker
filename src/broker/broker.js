@@ -2,27 +2,55 @@ import { REQUEST_TYPES, ProtocolResponse } from '../protocol/types.js';
 import { TopicManager } from './topic-manager.js';
 import { ConsumerGroupManager } from './consumer-group-manager.js';
 import { StorageEngine } from '../storage/storage-engine.js';
+import { ClusterManager } from '../cluster/cluster-manager.js';
+import { ReplicationManager } from '../cluster/replication-manager.js';
+import path from 'path';
 
 export class MessageBroker {
   /**
    * @param {object} [options={}]
    * @param {StorageEngine} [options.storageEngine]
+   * @param {ClusterManager} [options.clusterManager]
+   * @param {ReplicationManager} [options.replicationManager]
    * @param {object} [options.storageConfig]
+   * @param {string} [options.brokerId='broker-1']
+   * @param {string} [options.dataDir]
    */
   constructor(options = {}) {
+    /** @type {ClusterManager} Multi-broker cluster manager */
+    this.clusterManager = options.clusterManager || new ClusterManager(options);
+    this.brokerId = this.clusterManager.localBrokerId;
+    this.clusterManager.setBroker(this);
+
+    // Separate storage directory per brokerId if default dataDir is used
+    let dataDir = options.dataDir;
+    if (!dataDir || dataDir === './data') {
+      dataDir = path.join('./data', this.brokerId);
+    }
+    const storageConfig = { ...(options.storageConfig || options), dataDir };
+
     /** @type {TopicManager} Domain manager for topic lifecycle, partitions, and message logs */
     this.topicManager = new TopicManager();
     /** @type {ConsumerGroupManager} Domain manager for consumer groups and offsets */
     this.consumerGroupManager = new ConsumerGroupManager(this.topicManager);
     /** @type {StorageEngine} Persistent Storage Engine */
-    this.storageEngine = options.storageEngine || new StorageEngine(options.storageConfig || options);
+    this.storageEngine = options.storageEngine || new StorageEngine(storageConfig);
+    /** @type {ReplicationManager} Partition replication manager */
+    this.replicationManager = options.replicationManager || new ReplicationManager({
+      clusterManager: this.clusterManager,
+      topicManager: this.topicManager,
+      storageEngine: this.storageEngine
+    });
   }
 
   /**
-   * Recovers state from storage on startup.
+   * Recovers state from storage on startup and registers replication assignments.
    */
   recover() {
     this.storageEngine.recoverAllState(this.topicManager, this.consumerGroupManager);
+    for (const tObj of this.topicManager.listTopics()) {
+      this.replicationManager.registerTopicReplication(tObj.name, tObj.partitions, 1);
+    }
   }
 
   /**
@@ -30,9 +58,9 @@ export class MessageBroker {
    * 
    * @param {object} request - Validated request object
    * @param {string} [clientAddr='local'] - Client identifier for diagnostic logging
-   * @returns {object} Response object
+   * @returns {Promise<object>|object} Response object
    */
-  handleRequest(request, clientAddr = 'local') {
+  async handleRequest(request, clientAddr = 'local') {
     const uppercaseType = request.type.toUpperCase();
     const requestId = request.requestId;
 
@@ -58,16 +86,33 @@ export class MessageBroker {
       case REQUEST_TYPES.PING:
         return ProtocolResponse.pong(requestId);
 
+      case REQUEST_TYPES.GET_CLUSTER_INFO: {
+        const brokersList = this.clusterManager.getClusterInfo();
+        console.log(`[Broker] Cluster info requested by ${clientAddr}: ${brokersList.length} broker(s)`);
+        return ProtocolResponse.clusterInfo(brokersList, requestId);
+      }
+
       case REQUEST_TYPES.CREATE_TOPIC: {
         const partitionsCount = getField('partitions') ?? 3;
+        const repFactor = getField('replicationFactor') ?? 1;
+
+        // Validate replicationFactor
+        const valRes = this.replicationManager.validateReplicationFactor(repFactor);
+        if (!valRes.valid) {
+          return ProtocolResponse.error(valRes.error, requestId);
+        }
+
         const result = this.topicManager.createTopic(topic, partitionsCount);
         if (result.success) {
+          // Register topic partition replication assignments
+          this.replicationManager.registerTopicReplication(topic, result.partitions, repFactor);
+
           // Initialize storage directories for each partition
           for (let p = 0; p < result.partitions; p++) {
             this.storageEngine.ensurePartitionDir(topic, p);
           }
-          console.log(`[Broker] Created topic "${topic}" with ${result.partitions} partition(s) requested by ${clientAddr}`);
-          return ProtocolResponse.createTopicAck(topic, result.partitions, requestId);
+          console.log(`[Broker] Created topic "${topic}" with ${result.partitions} partition(s), replicationFactor=${repFactor} requested by ${clientAddr}`);
+          return ProtocolResponse.createTopicAck(topic, result.partitions, repFactor, requestId);
         } else {
           console.warn(`[Broker] Failed to create topic "${topic}" for ${clientAddr}: ${result.message}`);
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -83,6 +128,16 @@ export class MessageBroker {
       case REQUEST_TYPES.GET_TOPIC_INFO: {
         const result = this.topicManager.getTopicInfo(topic);
         if (result.success) {
+          if (Array.isArray(result.partitionInfo)) {
+            for (const pInfo of result.partitionInfo) {
+              const pMeta = this.replicationManager.getPartitionMetadata(topic, pInfo.partition);
+              if (pMeta) {
+                pInfo.leader = pMeta.leader;
+                pInfo.replicas = pMeta.replicas;
+                pInfo.highWaterMark = pMeta.highWaterMark;
+              }
+            }
+          }
           console.log(`[Broker] Topic info for "${topic}" requested by ${clientAddr}: ${result.messageCount} total message(s) across ${result.partitions} partition(s)`);
           return ProtocolResponse.topicInfo(result, requestId);
         } else {
@@ -93,6 +148,12 @@ export class MessageBroker {
       case REQUEST_TYPES.GET_PARTITION_INFO: {
         const result = this.topicManager.getPartitionInfo(topic, partition);
         if (result.success) {
+          const pMeta = this.replicationManager.getPartitionMetadata(topic, partition);
+          if (pMeta) {
+            result.leader = pMeta.leader;
+            result.replicas = pMeta.replicas;
+            result.highWaterMark = pMeta.highWaterMark;
+          }
           console.log(`[Broker] Partition info for "${topic}" partition ${partition} requested by ${clientAddr}: ${result.messageCount} message(s), nextOffset: ${result.nextOffset}`);
           return ProtocolResponse.partitionInfo(topic, result.partition, result.messageCount, requestId);
         } else {
@@ -121,7 +182,30 @@ export class MessageBroker {
         }
 
         const key = getField('key');
-        const enqueueResult = this.topicManager.enqueue(topic, message, partition, key);
+        const topicEntity = this.topicManager.getTopic(topic);
+        const selection = topicEntity.selectPartitionForProduce(partition, key);
+        if (selection.error) {
+          return ProtocolResponse.error({
+            code: selection.error.code,
+            message: selection.error.message
+          }, requestId);
+        }
+        const targetPartition = selection.partitionId;
+
+        // Leader Write Enforcement Check
+        if (!this.replicationManager.isLeader(topic, targetPartition)) {
+          const leaderId = this.replicationManager.getLeader(topic, targetPartition);
+          console.warn(`[Broker] PRODUCE rejected: Local broker '${this.brokerId}' is NOT_LEADER for '${topic}' partition ${targetPartition} (Leader: '${leaderId}')`);
+          return ProtocolResponse.error({
+            code: 'NOT_LEADER',
+            message: `Broker '${this.brokerId}' is not the leader for topic '${topic}' partition ${targetPartition}`,
+            topic,
+            partition: targetPartition,
+            leader: leaderId
+          }, requestId);
+        }
+
+        const enqueueResult = this.topicManager.enqueue(topic, message, targetPartition, key);
         if (!enqueueResult.success) {
           console.warn(`[Broker] PRODUCE failed on topic "${topic}": ${enqueueResult.message}`);
           return ProtocolResponse.error({
@@ -130,7 +214,7 @@ export class MessageBroker {
           }, requestId);
         }
 
-        // Persist message record to storage log segment
+        // Persist message record to local storage log segment
         try {
           this.storageEngine.appendMessage(topic, enqueueResult.partitionId, enqueueResult.offset, message);
         } catch (err) {
@@ -141,7 +225,9 @@ export class MessageBroker {
           }, requestId);
         }
 
-        const info = this.topicManager.getTopicInfo(topic);
+        // Replicate record to follower replicas over inter-broker TCP
+        await this.replicationManager.replicateToFollowers(topic, enqueueResult.partitionId, enqueueResult.offset, message, key);
+
         console.log(`[Broker] Produced message to "${topic}" (partition: ${enqueueResult.partitionId}, offset: ${enqueueResult.offset}) from ${clientAddr}: "${message}"`);
         return ProtocolResponse.produceAck(topic, enqueueResult.partitionId, enqueueResult.offset, requestId);
       }
@@ -254,6 +340,12 @@ export class MessageBroker {
         }
       }
 
+      case REQUEST_TYPES.REPLICATE_ACK:
+        return ProtocolResponse.replicateAck(getField('brokerId'), topic, partition, offset, requestId);
+
+      case REQUEST_TYPES.REPLICA_SYNC_RESPONSE:
+        return ProtocolResponse.replicaSyncResponse(topic, partition, getField('records') || [], requestId);
+
       default:
         console.warn(`[Broker] Unhandled request type "${request.type}" from ${clientAddr}`);
         return ProtocolResponse.error({ code: 'UNHANDLED_REQUEST_TYPE', message: `Unhandled request type "${request.type}"` }, requestId);
@@ -278,12 +370,13 @@ export class MessageBroker {
   }
 
   /**
-   * Resets all in-memory topics, queues, and consumer groups.
+   * Resets all in-memory topics, queues, consumer groups, and cluster connections.
    */
   clear() {
     this.topicManager.clear();
     this.consumerGroupManager.clear();
     this.storageEngine.close();
+    this.clusterManager.stop();
   }
 }
 

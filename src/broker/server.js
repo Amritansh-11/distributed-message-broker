@@ -1,9 +1,11 @@
 import net from 'net';
+import fs from 'fs';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import { StreamFramer } from '../protocol/framing.js';
 import { ProtocolDecoder, ProtocolEncoder } from '../protocol/codec.js';
 import { RequestValidator } from '../protocol/validator.js';
-import { ProtocolResponse } from '../protocol/types.js';
+import { ProtocolResponse, REQUEST_TYPES } from '../protocol/types.js';
 import { MessageBroker } from './broker.js';
 
 export class BrokerServer {
@@ -21,16 +23,36 @@ export class BrokerServer {
     } else {
       this.port = portOrOptions;
       this.host = host;
-      brokerOptions = options;
+      brokerOptions = { port: this.port, host: this.host, ...options };
     }
+
+    this.brokerId = brokerOptions.brokerId || process.env.BROKER_ID || 'broker-1';
+    brokerOptions.brokerId = this.brokerId;
+    brokerOptions.port = this.port;
+    brokerOptions.host = this.host;
+
     this.broker = new MessageBroker(brokerOptions);
     this.server = null;
     this.connections = new Set();
   }
 
   /**
-   * Starts the TCP Broker server after completing disk state recovery.
-   * Accepts connections only after state recovery succeeds.
+   * Helper accessor to access ClusterManager.
+   */
+  get clusterManager() {
+    return this.broker.clusterManager;
+  }
+
+  /**
+   * Helper accessor to access ReplicationManager.
+   */
+  get replicationManager() {
+    return this.broker.replicationManager;
+  }
+
+  /**
+   * Starts the TCP Broker server after completing disk state recovery
+   * and starting cluster manager inter-broker communication.
    * 
    * @returns {Promise<void>}
    */
@@ -43,6 +65,9 @@ export class BrokerServer {
       throw err;
     }
 
+    // Start cluster manager inter-broker heartbeat loop & connections
+    this.clusterManager.start();
+
     return new Promise((resolve, reject) => {
       this.server = net.createServer((socket) => {
         this._handleConnection(socket);
@@ -54,7 +79,7 @@ export class BrokerServer {
       });
 
       this.server.listen(this.port, this.host, () => {
-        console.log(`[Broker] TCP Message Broker listening on tcp://${this.host}:${this.port}`);
+        console.log(`[Broker ${this.brokerId}] TCP Message Broker listening on tcp://${this.host}:${this.port}`);
         resolve();
       });
     });
@@ -66,6 +91,8 @@ export class BrokerServer {
    */
   stop() {
     return new Promise((resolve) => {
+      this.clusterManager.stop();
+
       if (!this.server) return resolve();
 
       for (const socket of this.connections) {
@@ -74,7 +101,7 @@ export class BrokerServer {
       this.connections.clear();
 
       this.server.close(() => {
-        console.log('[Broker] Broker server shut down gracefully');
+        console.log(`[Broker ${this.brokerId}] Broker server shut down gracefully`);
         resolve();
       });
     });
@@ -82,18 +109,17 @@ export class BrokerServer {
 
   /**
    * Handles TCP socket connection pipeline.
-   * Pipeline: TCP -> Framing -> Decoder -> Validator -> Broker -> Encoder -> TCP
+   * Pipeline: TCP -> Framing -> Decoder -> Validator -> (Cluster / Broker Engine) -> Encoder -> TCP
    * 
    * @param {net.Socket} socket 
    */
   _handleConnection(socket) {
     const clientAddr = `${socket.remoteAddress}:${socket.remotePort}`;
-    console.log(`[Broker] Client connected: ${clientAddr}`);
 
     this.connections.add(socket);
     const framer = new StreamFramer();
 
-    socket.on('data', (chunk) => {
+    socket.on('data', async (chunk) => {
       const frames = framer.feed(chunk);
 
       for (const frame of frames) {
@@ -120,8 +146,41 @@ export class BrokerServer {
           continue;
         }
 
-        // 4. Core Message Broker Engine
-        const responseObj = this.broker.handleRequest(decoded.parsed, clientAddr);
+        const req = decoded.parsed;
+        const uppercaseType = req.type.toUpperCase();
+
+        // 4A. Inter-Broker Protocol Messages (BROKER_HELLO / BROKER_PING)
+        if (uppercaseType === REQUEST_TYPES.BROKER_HELLO) {
+          const { brokerId, host, port } = req.payload;
+          const responseObj = this.clusterManager.handleIncomingHello(brokerId, host, port, socket);
+          this._sendResponse(socket, responseObj);
+          continue;
+        }
+
+        if (uppercaseType === REQUEST_TYPES.BROKER_PING) {
+          const { brokerId } = req.payload;
+          const responseObj = this.clusterManager.handleIncomingPing(brokerId);
+          this._sendResponse(socket, responseObj);
+          continue;
+        }
+
+        // 4B. Inter-Broker Replication Messages (REPLICATE_RECORD / REPLICA_SYNC)
+        if (uppercaseType === REQUEST_TYPES.REPLICATE_RECORD) {
+          const { topic, partition, offset, message } = req.payload;
+          const responseObj = this.replicationManager.handleIncomingReplicateRecord(topic, partition, offset, message);
+          this._sendResponse(socket, responseObj);
+          continue;
+        }
+
+        if (uppercaseType === REQUEST_TYPES.REPLICA_SYNC) {
+          const { brokerId, topic, partition, fromOffset } = req.payload;
+          const responseObj = this.replicationManager.handleIncomingReplicaSync(brokerId, topic, partition, fromOffset);
+          this._sendResponse(socket, responseObj);
+          continue;
+        }
+
+        // 4C. Core Message Broker Domain Engine
+        const responseObj = await this.broker.handleRequest(req, clientAddr);
 
         // 5. Encoder & Framing -> Write to TCP Socket
         this._sendResponse(socket, responseObj);
@@ -130,7 +189,6 @@ export class BrokerServer {
 
     const cleanup = () => {
       if (this.connections.has(socket)) {
-        console.log(`[Broker] Client disconnected: ${clientAddr}`);
         this.connections.delete(socket);
       }
     };
@@ -162,18 +220,38 @@ export class BrokerServer {
   }
 }
 
-// Start broker if executed directly
+// Start broker if executed directly via CLI
 const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isDirectExecution) {
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5000;
-  const broker = new BrokerServer(PORT);
+  // Parse CLI args e.g. --id=broker-1 --port=5000 --host=127.0.0.1 --dataDir=./data/broker-1 --config=cluster.json
+  const args = process.argv.slice(2);
+  let brokerId = process.env.BROKER_ID || 'broker-1';
+  let port = process.env.BROKER_PORT ? parseInt(process.env.BROKER_PORT, 10) : 5000;
+  let host = process.env.BROKER_HOST || '127.0.0.1';
+  let dataDir = process.env.DATA_DIR;
+  let clusterConfig = null;
+
+  for (const arg of args) {
+    if (arg.startsWith('--id=')) brokerId = arg.replace('--id=', '');
+    if (arg.startsWith('--port=')) port = parseInt(arg.replace('--port=', ''), 10);
+    if (arg.startsWith('--host=')) host = arg.replace('--host=', '');
+    if (arg.startsWith('--dataDir=')) dataDir = arg.replace('--dataDir=', '');
+    if (arg.startsWith('--config=')) {
+      const configPath = arg.replace('--config=', '');
+      if (fs.existsSync(configPath)) {
+        clusterConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      }
+    }
+  }
+
+  const broker = new BrokerServer({ brokerId, port, host, dataDir, clusterConfig });
   broker.start().catch((err) => {
-    console.error('Failed to start broker:', err);
+    console.error(`Failed to start broker ${brokerId}:`, err);
     process.exit(1);
   });
 
   const shutdown = async () => {
-    console.log('\n[Broker] Shutting down broker...');
+    console.log(`\n[Broker ${brokerId}] Shutting down broker...`);
     await broker.stop();
     process.exit(0);
   };

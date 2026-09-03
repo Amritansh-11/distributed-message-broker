@@ -1,27 +1,26 @@
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
+import { BrokerServer } from '../src/broker/server.js';
+import { MessageBroker } from '../src/broker/broker.js';
 import { StorageEngine } from '../src/storage/storage-engine.js';
-import { LogSegment } from '../src/storage/segment.js';
-import { RecordFormat } from '../src/storage/record-format.js';
-import { BrokerServer, MessageBroker } from '../src/broker/broker.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
 import { ProtocolRequest } from '../src/protocol/types.js';
 
 const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', `test-storage-data-${Date.now()}`);
 
+function cleanupDataDir(dir) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(`[FAIL] ${message}`);
   }
   console.log(`[PASS] ${message}`);
-}
-
-function cleanupDataDir(dir) {
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 }
 
 async function runStorageTests() {
@@ -32,31 +31,35 @@ async function runStorageTests() {
   try {
     cleanupDataDir(TEST_DATA_DIR);
 
-    // TEST 1: Message is persisted to disk
+    // TEST 1: Messages Persisted to Disk on PRODUCE
     console.log('--- TEST 1: Message Persisted to Disk ---');
-    const storage1 = new StorageEngine({ dataDir: TEST_DATA_DIR, maxMessagesPerSegment: 1000 });
-    storage1.init();
-    storage1.appendMessage('orders', 0, 0, 'Order Persistent Payload 1');
-    const segPath1 = path.join(TEST_DATA_DIR, 'topics', 'orders', 'partition-0', '000000000000.log');
-    assert(fs.existsSync(segPath1), 'Segment log file 000000000000.log exists on disk');
+    const broker1 = new MessageBroker({ dataDir: TEST_DATA_DIR });
+    await broker1.handleRequest({ type: 'CREATE_TOPIC', payload: { topic: 'orders', partitions: 1 } });
+    await broker1.handleRequest({ type: 'PRODUCE', payload: { topic: 'orders', partition: 0, message: 'Order Persistent Payload 1' } });
+    await broker1.handleRequest({ type: 'PRODUCE', payload: { topic: 'orders', partition: 0, message: 'Order Persistent Payload 2' } });
 
-    // TEST 2 & 3: Message & Multiple Messages Survive Broker Restart
+    const logFile = path.join(TEST_DATA_DIR, 'topics', 'orders', 'partition-0', '000000000000.log');
+    assert(fs.existsSync(logFile), 'Segment log file 000000000000.log exists on disk');
+
+    // Close first broker instance to simulate shutdown
+    broker1.clear();
+
+    // TEST 2 & 3: Messages Recovered on Restart
     console.log('\n--- TEST 2 & 3: Messages Survive Broker Restart ---');
-    storage1.appendMessage('orders', 0, 1, 'Order Persistent Payload 2');
-    storage1.close();
-
-    // Restart broker with same data directory
     const broker2 = new MessageBroker({ dataDir: TEST_DATA_DIR });
     broker2.recover();
-    assert(broker2.topicManager.hasTopic('orders') === true, 'Topic "orders" recovered from disk');
-    const info2 = broker2.topicManager.getTopicInfo('orders');
-    assert(info2.messageCount === 2, '2 messages recovered into in-memory partition log');
 
-    // TEST 4 & 5: Multiple Topics & Multiple Partitions Survive Restart
+    assert(broker2.topicManager.hasTopic('orders'), 'Topic "orders" recovered from disk');
+    const orderInfo = broker2.topicManager.getTopicInfo('orders');
+    assert(orderInfo.messageCount === 2, '2 messages recovered into in-memory partition log');
+
+    // TEST 4 & 5: Multiple Topics & Partitions Recovered
     console.log('\n--- TEST 4 & 5: Multiple Topics & Partitions Survive Restart ---');
-    broker2.handleRequest({ type: 'CREATE_TOPIC', payload: { topic: 'payments', partitions: 2 } });
-    broker2.handleRequest({ type: 'PRODUCE', payload: { topic: 'payments', partition: 0, message: 'Payment 1' } });
-    broker2.handleRequest({ type: 'PRODUCE', payload: { topic: 'payments', partition: 1, message: 'Payment 2' } });
+    await broker2.handleRequest({ type: 'CREATE_TOPIC', payload: { topic: 'payments', partitions: 2 } });
+    await broker2.handleRequest({ type: 'PRODUCE', payload: { topic: 'payments', partition: 0, message: 'Payment 1' } });
+    await broker2.handleRequest({ type: 'PRODUCE', payload: { topic: 'payments', partition: 1, message: 'Payment 2' } });
+
+    broker2.clear();
 
     // Restart broker again
     const broker3 = new MessageBroker({ dataDir: TEST_DATA_DIR });
@@ -68,34 +71,34 @@ async function runStorageTests() {
 
     // TEST 6 & 7: Offsets Survive Restart & Next Offset is Correct
     console.log('\n--- TEST 6 & 7: Offsets & Next Offset After Restart ---');
-    const prodResD = broker3.handleRequest({ type: 'PRODUCE', payload: { topic: 'orders', partition: 0, message: 'Order Persistent Payload 3' } });
+    const prodResD = await broker3.handleRequest({ type: 'PRODUCE', payload: { topic: 'orders', partition: 0, message: 'Order Persistent Payload 3' } });
     assert(prodResD.success === true, 'PRODUCE succeeds after restart');
     assert(prodResD.payload.offset === 2, 'Next produced offset is 2 (continued after 0, 1)');
 
     // TEST 8: CONSUME by Offset Works After Restart
     console.log('\n--- TEST 8: CONSUME by Offset After Restart ---');
-    const consRes1 = broker3.handleRequest({ type: 'CONSUME', payload: { topic: 'orders', partition: 0, offset: 1 } });
+    const consRes1 = await broker3.handleRequest({ type: 'CONSUME', payload: { topic: 'orders', partition: 0, offset: 1 } });
     assert(consRes1.success === true && consRes1.payload.message === 'Order Persistent Payload 2', 'CONSUME offset 1 returns "Order Persistent Payload 2"');
 
     // TEST 9: Consumed Messages Remain Persisted
     console.log('\n--- TEST 9: Consumed Messages Remain Persisted ---');
-    const consResRepeat = broker3.handleRequest({ type: 'CONSUME', payload: { topic: 'orders', partition: 0, offset: 1 } });
+    const consResRepeat = await broker3.handleRequest({ type: 'CONSUME', payload: { topic: 'orders', partition: 0, offset: 1 } });
     assert(consResRepeat.success === true && consResRepeat.payload.message === 'Order Persistent Payload 2', 'Message at offset 1 readable again after consumption');
 
     // TEST 10 & 11: Consumer Group Committed Offsets & Independent Offsets Survive Restart
     console.log('\n--- TEST 10 & 11: Consumer Group Offsets Survive Restart ---');
-    broker3.handleRequest({ type: 'JOIN_GROUP', payload: { groupId: 'order-workers', consumerId: 'worker-1', topics: ['orders'] } });
-    broker3.handleRequest({ type: 'JOIN_GROUP', payload: { groupId: 'analytics-workers', consumerId: 'analyst-1', topics: ['orders'] } });
+    await broker3.handleRequest({ type: 'JOIN_GROUP', payload: { groupId: 'order-workers', consumerId: 'worker-1', topics: ['orders'] } });
+    await broker3.handleRequest({ type: 'JOIN_GROUP', payload: { groupId: 'analytics-workers', consumerId: 'analyst-1', topics: ['orders'] } });
 
-    broker3.handleRequest({ type: 'COMMIT_OFFSET', payload: { groupId: 'order-workers', topic: 'orders', partition: 0, offset: 2 } });
-    broker3.handleRequest({ type: 'COMMIT_OFFSET', payload: { groupId: 'analytics-workers', topic: 'orders', partition: 0, offset: 0 } });
+    await broker3.handleRequest({ type: 'COMMIT_OFFSET', payload: { groupId: 'order-workers', topic: 'orders', partition: 0, offset: 2 } });
+    await broker3.handleRequest({ type: 'COMMIT_OFFSET', payload: { groupId: 'analytics-workers', topic: 'orders', partition: 0, offset: 0 } });
 
     // Restart broker
     const broker4 = new MessageBroker({ dataDir: TEST_DATA_DIR });
     broker4.recover();
 
-    const gInfoOrders = broker4.handleRequest({ type: 'GET_GROUP_INFO', payload: { groupId: 'order-workers' } });
-    const gInfoAnalytics = broker4.handleRequest({ type: 'GET_GROUP_INFO', payload: { groupId: 'analytics-workers' } });
+    const gInfoOrders = await broker4.handleRequest({ type: 'GET_GROUP_INFO', payload: { groupId: 'order-workers' } });
+    const gInfoAnalytics = await broker4.handleRequest({ type: 'GET_GROUP_INFO', payload: { groupId: 'analytics-workers' } });
 
     assert(gInfoOrders.success === true && gInfoOrders.payload.committedOffsets[0].offset === 2, 'order-workers committed offset 2 recovered');
     assert(gInfoAnalytics.success === true && gInfoAnalytics.payload.committedOffsets[0].offset === 0, 'analytics-workers committed offset 0 recovered independently');
@@ -106,10 +109,10 @@ async function runStorageTests() {
     cleanupDataDir(ROLLOVER_DIR);
 
     const brokerRollover1 = new MessageBroker({ dataDir: ROLLOVER_DIR, maxMessagesPerSegment: 2 });
-    brokerRollover1.handleRequest({ type: 'CREATE_TOPIC', payload: { topic: 'sensor_logs', partitions: 1 } });
+    await brokerRollover1.handleRequest({ type: 'CREATE_TOPIC', payload: { topic: 'sensor_logs', partitions: 1 } });
 
     for (let i = 0; i < 5; i++) {
-      brokerRollover1.handleRequest({ type: 'PRODUCE', payload: { topic: 'sensor_logs', partition: 0, message: `Sensor Msg ${i}` } });
+      await brokerRollover1.handleRequest({ type: 'PRODUCE', payload: { topic: 'sensor_logs', partition: 0, message: `Sensor Msg ${i}` } });
     }
 
     const sensorDir = path.join(ROLLOVER_DIR, 'topics', 'sensor_logs', 'partition-0');
@@ -121,7 +124,7 @@ async function runStorageTests() {
     brokerRollover2.recover();
 
     for (let i = 0; i < 5; i++) {
-      const readMsg = brokerRollover2.handleRequest({ type: 'CONSUME', payload: { topic: 'sensor_logs', partition: 0, offset: i } });
+      const readMsg = await brokerRollover2.handleRequest({ type: 'CONSUME', payload: { topic: 'sensor_logs', partition: 0, offset: i } });
       assert(readMsg.success === true && readMsg.payload.message === `Sensor Msg ${i}`, `Recovered message ${i} ("Sensor Msg ${i}") from segment files`);
     }
     cleanupDataDir(ROLLOVER_DIR);
@@ -149,13 +152,13 @@ async function runStorageTests() {
     const infoCrash = brokerCrash.topicManager.getTopicInfo('crash_topic');
     assert(infoCrash.messageCount === 2, 'Recovered exactly 2 valid messages preceding crash tail');
 
-    const msg0 = brokerCrash.handleRequest({ type: 'CONSUME', payload: { topic: 'crash_topic', partition: 0, offset: 0 } });
-    const msg1 = brokerCrash.handleRequest({ type: 'CONSUME', payload: { topic: 'crash_topic', partition: 0, offset: 1 } });
+    const msg0 = await brokerCrash.handleRequest({ type: 'CONSUME', payload: { topic: 'crash_topic', partition: 0, offset: 0 } });
+    const msg1 = await brokerCrash.handleRequest({ type: 'CONSUME', payload: { topic: 'crash_topic', partition: 0, offset: 1 } });
     assert(msg0.payload.message === 'Valid Msg 0', 'Msg 0 preserved intact');
     assert(msg1.payload.message === 'Valid Msg 1', 'Msg 1 preserved intact');
 
     // Produce next message after crash recovery
-    const msgNext = brokerCrash.handleRequest({ type: 'PRODUCE', payload: { topic: 'crash_topic', partition: 0, message: 'Post-Crash Msg 2' } });
+    const msgNext = await brokerCrash.handleRequest({ type: 'PRODUCE', payload: { topic: 'crash_topic', partition: 0, message: 'Post-Crash Msg 2' } });
     assert(msgNext.success === true && msgNext.payload.offset === 2, 'Next message after crash receives offset 2');
 
     cleanupDataDir(CRASH_DIR);

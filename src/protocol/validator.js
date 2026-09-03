@@ -54,6 +54,7 @@ export class RequestValidator {
     switch (uppercaseType) {
       case REQUEST_TYPES.PING:
       case REQUEST_TYPES.LIST_TOPICS:
+      case REQUEST_TYPES.GET_CLUSTER_INFO:
         return { valid: true };
 
       case REQUEST_TYPES.CREATE_TOPIC: {
@@ -79,6 +80,19 @@ export class RequestValidator {
             return {
               valid: false,
               error: partitionValidation.error
+            };
+          }
+        }
+
+        const repFactor = getField('replicationFactor');
+        if (repFactor !== undefined && repFactor !== null) {
+          if (typeof repFactor !== 'number' || !Number.isInteger(repFactor) || repFactor < 1) {
+            return {
+              valid: false,
+              error: {
+                code: 'INVALID_REPLICATION_FACTOR',
+                message: 'Replication factor must be an integer >= 1'
+              }
             };
           }
         }
@@ -275,6 +289,61 @@ export class RequestValidator {
         if (!groupId || typeof groupId !== 'string') {
           return { valid: false, error: 'GET_GROUP_INFO request must include a string "groupId"' };
         }
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.BROKER_HELLO: {
+        const brokerId = getField('brokerId');
+        if (!brokerId || typeof brokerId !== 'string') {
+          return { valid: false, error: 'BROKER_HELLO request must include a string "brokerId"' };
+        }
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.BROKER_PING: {
+        const brokerId = getField('brokerId');
+        if (!brokerId || typeof brokerId !== 'string') {
+          return { valid: false, error: 'BROKER_PING request must include a string "brokerId"' };
+        }
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.REPLICATE_RECORD: {
+        const topic = getField('topic');
+        const partition = getField('partition');
+        const offset = getField('offset');
+        const message = getField('message');
+
+        if (!topic || typeof topic !== 'string') return { valid: false, error: 'REPLICATE_RECORD must include "topic"' };
+        if (partition === undefined || typeof partition !== 'number' || partition < 0) return { valid: false, error: 'REPLICATE_RECORD must include valid "partition"' };
+        if (offset === undefined || typeof offset !== 'number' || offset < 0) return { valid: false, error: 'REPLICATE_RECORD must include valid "offset"' };
+        if (typeof message !== 'string') return { valid: false, error: 'REPLICATE_RECORD must include string "message"' };
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.REPLICATE_ACK: {
+        const brokerId = getField('brokerId');
+        const topic = getField('topic');
+        const partition = getField('partition');
+        const offset = getField('offset');
+
+        if (!brokerId || typeof brokerId !== 'string') return { valid: false, error: 'REPLICATE_ACK must include "brokerId"' };
+        if (!topic || typeof topic !== 'string') return { valid: false, error: 'REPLICATE_ACK must include "topic"' };
+        if (partition === undefined || typeof partition !== 'number') return { valid: false, error: 'REPLICATE_ACK must include "partition"' };
+        if (offset === undefined || typeof offset !== 'number') return { valid: false, error: 'REPLICATE_ACK must include "offset"' };
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.REPLICA_SYNC: {
+        const brokerId = getField('brokerId');
+        const topic = getField('topic');
+        const partition = getField('partition');
+        const fromOffset = getField('fromOffset');
+
+        if (!brokerId || typeof brokerId !== 'string') return { valid: false, error: 'REPLICA_SYNC must include "brokerId"' };
+        if (!topic || typeof topic !== 'string') return { valid: false, error: 'REPLICA_SYNC must include "topic"' };
+        if (partition === undefined || typeof partition !== 'number') return { valid: false, error: 'REPLICA_SYNC must include "partition"' };
+        if (fromOffset === undefined || typeof fromOffset !== 'number' || fromOffset < 0) return { valid: false, error: 'REPLICA_SYNC must include non-negative "fromOffset"' };
         return { valid: true };
       }
 
