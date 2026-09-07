@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: distributed-message-broker
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm run broker
+    healthCheckPath: /health
+    disk:
+      name: broker-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: BROKER_ID
+        value: broker-1
+      - key: BROKER_HOST
+        value: 0.0.0.0
+      - key: BROKER_PORT
+        value: 5000
+      - key: BROKER_DATA_DIR
+        value: /app/data
+      - key: LOG_LEVEL
+        value: INFO

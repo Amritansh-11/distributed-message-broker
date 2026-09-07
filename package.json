@@ -24,7 +24,10 @@
     "test:replication": "node tests/replication.test.js",
     "test:election": "node tests/leader-election.test.js",
     "test:m10": "node tests/m10-observability-docker.test.js",
-    "test:stress": "node tests/m10-stress.test.js"
+    "test:stress": "node tests/m10-stress.test.js",
+    "benchmark:k6": "node benchmarks/run-benchmarks.js",
+    "benchmark:tcp": "node benchmarks/tcp-benchmark.js",
+    "benchmark": "node benchmarks/run-benchmarks.js"
   },
   "keywords": [
     "distributed-systems",

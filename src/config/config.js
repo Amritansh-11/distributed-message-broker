@@ -15,7 +15,7 @@ export class ConfigLoader {
     const brokerId = env.BROKER_ID || 'broker-1';
     const host = env.BROKER_HOST || '127.0.0.1';
     const port = Number(env.BROKER_PORT) || 5000;
-    const httpPort = Number(env.HTTP_PORT) || (port + 3000); // Default HTTP port 8000 for broker on 5000
+    const httpPort = Number(env.HTTP_PORT) || Number(env.PORT) || (port + 3000);
     const dataDir = env.BROKER_DATA_DIR || `./data/${brokerId}`;
     const logLevel = (env.LOG_LEVEL || 'INFO').toUpperCase();
     const replicationFactor = Number(env.REPLICATION_FACTOR) || 1;

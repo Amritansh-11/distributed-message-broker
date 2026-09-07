@@ -5,7 +5,7 @@ import { BrokerServer } from '../src/broker/server.js';
 import { StreamFramer } from '../src/protocol/framing.js';
 import { ProtocolEncoder, ProtocolDecoder } from '../src/protocol/codec.js';
 
-const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-broker-5002');
+const TEST_DATA_DIR = path.join(process.cwd(), 'scratch', 'test-broker-5678');
 
 function cleanupDataDir(dir) {
   if (fs.existsSync(dir)) {
@@ -26,14 +26,14 @@ async function runTests() {
   console.log('==================================================\n');
 
   cleanupDataDir(TEST_DATA_DIR);
-  const testPort = 5002;
+  const testPort = 5678;
   const broker = new BrokerServer({ port: testPort, host: '127.0.0.1', dataDir: TEST_DATA_DIR });
 
   try {
     // TEST 1: Broker Startup
     console.log('--- TEST 1: Broker Startup ---');
     await broker.start();
-    assert(broker.server !== null && broker.server.listening, 'Broker server starts and listens on port 5002');
+    assert(broker.server !== null && broker.server.listening, 'Broker server starts and listens on port 5678');
 
     // Helper function to send raw or encoded frame to broker and await parsed response
     const sendCommand = (cmdObj) => {
