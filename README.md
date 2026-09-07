@@ -152,6 +152,32 @@ TopicManager       ConsumerGroupManager   StorageEngine          ClusterManager
   ]
   ```
 
+## Performance Benchmarking
+
+The broker was benchmarked using k6 and custom TCP wire benchmarks. The benchmark scripts and methodology are included in the repository.
+
+### k6 Load Test
+
+- Virtual Users: **215**
+- Total HTTP requests: **30,636**
+- Test duration: **25.8 seconds**
+- HTTP throughput: **1,185.90 requests/sec**
+- Check success rate: **99.70%**
+
+### TCP Wire Benchmark
+
+| Operation | Throughput | Average Latency |
+|---|---:|---:|
+| TCP Produce | **681 msgs/sec** | **1.23 ms** |
+| TCP Consume | **8,130 msgs/sec** | **0.04 ms** |
+
+TCP Produce was tested with **10 concurrent TCP connections**.
+
+### Test Reliability
+
+- **15/15 unit and integration test suites passed**
+- Benchmark completed with **zero exit errors**
+
 ---
 
 ## Testing Commands
