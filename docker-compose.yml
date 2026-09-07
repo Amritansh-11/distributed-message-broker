@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  broker-1:
+    build: .
+    container_name: broker-1
+    environment:
+      - BROKER_ID=broker-1
+      - BROKER_HOST=broker-1
+      - BROKER_PORT=5000
+      - HTTP_PORT=8000
+      - BROKER_DATA_DIR=/app/data
+      - CLUSTER_BROKERS=broker-1:broker-1:5000,broker-2:broker-2:5001,broker-3:broker-3:5002
+      - REPLICATION_FACTOR=3
+      - LOG_LEVEL=INFO
+    ports:
+      - "5000:5000"
+      - "8001:8000"
+    volumes:
+      - broker1-data:/app/data
+    networks:
+      - broker-net
+    restart: unless-stopped
+
+  broker-2:
+    build: .
+    container_name: broker-2
+    environment:
+      - BROKER_ID=broker-2
+      - BROKER_HOST=broker-2
+      - BROKER_PORT=5001
+      - HTTP_PORT=8001
+      - BROKER_DATA_DIR=/app/data
+      - CLUSTER_BROKERS=broker-1:broker-1:5000,broker-2:broker-2:5001,broker-3:broker-3:5002
+      - REPLICATION_FACTOR=3
+      - LOG_LEVEL=INFO
+    ports:
+      - "5001:5001"
+      - "8002:8001"
+    volumes:
+      - broker2-data:/app/data
+    networks:
+      - broker-net
+    restart: unless-stopped
+
+  broker-3:
+    build: .
+    container_name: broker-3
+    environment:
+      - BROKER_ID=broker-3
+      - BROKER_HOST=broker-3
+      - BROKER_PORT=5002
+      - HTTP_PORT=8002
+      - BROKER_DATA_DIR=/app/data
+      - CLUSTER_BROKERS=broker-1:broker-1:5000,broker-2:broker-2:5001,broker-3:broker-3:5002
+      - REPLICATION_FACTOR=3
+      - LOG_LEVEL=INFO
+    ports:
+      - "5002:5002"
+      - "8003:8002"
+    volumes:
+      - broker3-data:/app/data
+    networks:
+      - broker-net
+    restart: unless-stopped
+
+networks:
+  broker-net:
+    driver: bridge
+
+volumes:
+  broker1-data:
+  broker2-data:
+  broker3-data:
