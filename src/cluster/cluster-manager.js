@@ -62,7 +62,7 @@ export class ClusterManager {
   }
 
   /**
-   * Sets parent broker instance reference for routing replication messages.
+   * Sets parent broker instance reference for routing replication and election messages.
    * @param {any} broker 
    */
   setBroker(broker) {
@@ -120,6 +120,31 @@ export class ClusterManager {
   }
 
   /**
+   * Marks node alive and notifies parent broker.
+   * @param {BrokerNode} node 
+   */
+  _markNodeAlive(node) {
+    const prevStatus = node.status;
+    node.markAlive();
+    if (prevStatus !== 'alive' && this.broker && this.broker.leaderElectionManager) {
+      console.log(`[ClusterManager] Node '${node.id}' transitioned to ALIVE`);
+    }
+  }
+
+  /**
+   * Marks node down and notifies parent broker.
+   * @param {BrokerNode} node 
+   */
+  _markNodeDown(node) {
+    const prevStatus = node.status;
+    node.markDown();
+    if (this.active && prevStatus === 'alive' && this.broker && this.broker.leaderElectionManager) {
+      console.warn(`[ClusterManager] Node '${node.id}' transitioned to DOWN. Notifying LeaderElectionManager...`);
+      this.broker.leaderElectionManager.handleBrokerFailure(node.id);
+    }
+  }
+
+  /**
    * Connects or sends BROKER_PING to a remote broker node over TCP socket.
    * @param {BrokerNode} node 
    */
@@ -132,7 +157,7 @@ export class ClusterManager {
         const pingReq = ProtocolEncoder.encode(ProtocolRequest.brokerPing(this.localBrokerId));
         node.socket.write(pingReq);
       } catch (err) {
-        node.markDown();
+        this._markNodeDown(node);
       }
       return;
     }
@@ -161,7 +186,7 @@ export class ClusterManager {
 
         if (uppercaseType === 'BROKER_HELLO_ACK') {
           node.socket = socket;
-          node.markAlive();
+          this._markNodeAlive(node);
         } else if (uppercaseType === 'BROKER_PONG') {
           node.updateHeartbeat();
         } else if (uppercaseType === REQUEST_TYPES.REPLICATE_RECORD && this.broker) {
@@ -176,13 +201,19 @@ export class ClusterManager {
           if (socket.writable) {
             socket.write(ProtocolEncoder.encode(resp));
           }
+        } else if (uppercaseType === REQUEST_TYPES.LEADER_ANNOUNCE && this.broker && this.broker.leaderElectionManager) {
+          const { topic, partition, leader, leaderEpoch, replicas } = res.payload;
+          const resp = this.broker.leaderElectionManager.handleLeaderAnnounce(topic, partition, leader, leaderEpoch, replicas);
+          if (socket.writable) {
+            socket.write(ProtocolEncoder.encode(resp));
+          }
         }
       }
     });
 
     const cleanup = () => {
       if (node.socket === socket) {
-        node.markDown();
+        this._markNodeDown(node);
       }
     };
 
@@ -212,7 +243,7 @@ export class ClusterManager {
       if (node.status === 'alive') {
         if (node.lastHeartbeat && (now - node.lastHeartbeat > this.heartbeatTimeoutMs)) {
           console.warn(`[ClusterManager] Broker ${node.id} missed heartbeats for ${now - node.lastHeartbeat}ms. Marking status DOWN.`);
-          node.markDown();
+          this._markNodeDown(node);
         }
       }
     }
@@ -238,11 +269,11 @@ export class ClusterManager {
 
     const node = this.nodes.get(remoteBrokerId);
     node.socket = socket;
-    node.markAlive();
+    this._markNodeAlive(node);
 
     const cleanup = () => {
       if (node.socket === socket) {
-        node.markDown();
+        this._markNodeDown(node);
       }
     };
     socket.on('close', cleanup);

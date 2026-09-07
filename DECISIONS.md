@@ -14,7 +14,7 @@
 
 ## ADR 003: Pure Domain Engine Decoupled From Network Sockets
 - **Status**: Accepted
-- **Decision**: Keep domain entities (`MessageBroker`, `TopicManager`, `Topic`, `Partition`, `ConsumerGroupManager`, `StorageEngine`, `ClusterManager`, `ReplicationManager`) pure.
+- **Decision**: Keep domain entities (`MessageBroker`, `TopicManager`, `Topic`, `Partition`, `ConsumerGroupManager`, `StorageEngine`, `ClusterManager`, `ReplicationManager`, `LeaderElectionManager`) pure.
 
 ---
 
@@ -50,11 +50,18 @@
 
 ## ADR 009: Partition Replication & Replica Synchronization
 - **Status**: Accepted
-- **Context**: Ensure messages are replicated across follower brokers to protect against single node data loss.
 - **Decision**: Implement single-leader partition replication in `ReplicationManager`.
-- **Deterministic Replica Assignment**: `Leader = brokers[p % N]`, `Replicas = brokers[(p + r) % N]`.
-- **Leader Write Enforcement**: Produce requests sent to followers return `NOT_LEADER` with the current leader broker ID.
-- **Offset Preservation**: Followers persist records at the exact leader-assigned offset via `enqueueWithOffset`.
-- **High-Water Mark**: Compute $HWM$ as minimum offset across active caught-up replicas.
-- **Catch-Up Synchronization**: Recovering followers send `REPLICA_SYNC` to stream missing log entries from leader.
-- **Scope Limits**: Intentionally defer leader election and automatic failover to future milestones.
+
+---
+
+## ADR 010: Failure Handling & Deterministic Leader Election
+- **Status**: Accepted
+- **Context**: Handle broker and partition leader failures by automatically electing a new leader among surviving replicas without data loss or split-brain inconsistencies.
+- **Decision**: Implement `LeaderElectionManager` with deterministic ranking.
+- **Candidate Ranking**:
+  1. Primary: Highest replicated / local partition log offset.
+  2. Secondary: Alphabetical `brokerId` ascending (`'broker-2'` < `'broker-3'`).
+- **Leader Epoch**: Increment `leaderEpoch` on every election. Reject requests with stale epochs (`STALE_LEADER` / `NOT_LEADER`).
+- **Partition Unavailable**: Set partition status to `NO_LEADER` if no candidates are `ALIVE`. Return `PARTITION_UNAVAILABLE`.
+- **Old Leader Rejoin**: Returning broker rejoins as follower and catches up via `REPLICA_SYNC`.
+- **Scope Limits**: Intentionally defer Raft/Paxos/ZooKeeper consensus to maintain deterministic, educational implementation.

@@ -25,7 +25,7 @@ export class ReplicationManager {
     this.storageEngine = options.storageEngine;
     this.localBrokerId = this.clusterManager.localBrokerId;
 
-    /** @type {Map<string, { leader: string, replicas: string[], replicationFactor: number }>} Key: "topic:partition" */
+    /** @type {Map<string, { leader: string|null, leaderEpoch: number, status: string, replicas: string[], replicationFactor: number }>} Key: "topic:partition" */
     this.partitionMetadata = new Map();
 
     /** @type {Map<string, Map<string, { status: string, lastReplicatedOffset: number }>>} Key: "topic:partition" -> Map<brokerId, state> */
@@ -89,6 +89,8 @@ export class ReplicationManager {
 
       this.partitionMetadata.set(pKey, {
         leader,
+        leaderEpoch: 1,
+        status: 'HEALTHY',
         replicas,
         replicationFactor
       });
@@ -106,7 +108,101 @@ export class ReplicationManager {
   }
 
   /**
-   * Gets partition metadata including leader, replicas, replicaStates, and highWaterMark.
+   * Updates leader, leaderEpoch, and status for a partition.
+   * 
+   * @param {string} topic 
+   * @param {number} partition 
+   * @param {string|null} newLeader 
+   * @param {number} newLeaderEpoch 
+   * @param {string} status 
+   * @param {string[]} [newReplicas] 
+   */
+  setPartitionLeaderAndEpoch(topic, partition, newLeader, newLeaderEpoch, status = 'HEALTHY', newReplicas) {
+    const pKey = `${topic}:${partition}`;
+    let meta = this.partitionMetadata.get(pKey);
+    if (!meta) {
+      meta = {
+        leader: newLeader,
+        leaderEpoch: newLeaderEpoch,
+        status,
+        replicas: newReplicas || (newLeader ? [newLeader] : []),
+        replicationFactor: newReplicas ? newReplicas.length : 1
+      };
+      this.partitionMetadata.set(pKey, meta);
+    } else {
+      meta.leader = newLeader;
+      meta.leaderEpoch = newLeaderEpoch;
+      meta.status = status;
+      if (newReplicas) meta.replicas = newReplicas;
+    }
+  }
+
+  /**
+   * Updates replica state (status, lastReplicatedOffset) for a specific replica broker.
+   * 
+   * @param {string} topic 
+   * @param {number} partition 
+   * @param {string} brokerId 
+   * @param {{ status?: string, lastReplicatedOffset?: number }} stateObj 
+   */
+  updateReplicaState(topic, partition, brokerId, stateObj) {
+    const pKey = `${topic}:${partition}`;
+    let states = this.replicaStates.get(pKey);
+    if (!states) {
+      states = new Map();
+      this.replicaStates.set(pKey, states);
+    }
+    const current = states.get(brokerId) || { status: 'UNKNOWN', lastReplicatedOffset: -1 };
+    states.set(brokerId, { ...current, ...stateObj });
+  }
+
+  /**
+   * Updates partition status.
+   * @param {string} topic 
+   * @param {number} partition 
+   * @param {string} status 
+   * @param {string|null} [leader] 
+   */
+  setPartitionStatus(topic, partition, status, leader = null) {
+    const pKey = `${topic}:${partition}`;
+    const meta = this.partitionMetadata.get(pKey);
+    if (meta) {
+      meta.status = status;
+      if (leader !== undefined) meta.leader = leader;
+    }
+  }
+
+  /**
+   * Gets current partition status ('HEALTHY' | 'ELECTION' | 'NO_LEADER').
+   * @param {string} topic 
+   * @param {number} partition 
+   * @returns {string}
+   */
+  getPartitionStatus(topic, partition) {
+    const pKey = `${topic}:${partition}`;
+    const meta = this.partitionMetadata.get(pKey);
+    return meta ? meta.status : 'HEALTHY';
+  }
+
+  /**
+   * Returns list of all partition metadata objects.
+   * @returns {Array<object>}
+   */
+  getAllPartitionMetadata() {
+    const list = [];
+    for (const [pKey, meta] of this.partitionMetadata.entries()) {
+      const [topic, partitionStr] = pKey.split(':');
+      list.push({
+        topic,
+        partition: parseInt(partitionStr, 10),
+        ...meta
+      });
+    }
+    return list;
+  }
+
+  /**
+   * Gets partition metadata including leader, leaderEpoch, status, replicas, replicaStates, and highWaterMark.
    * 
    * @param {string} topic 
    * @param {number} partition 
@@ -129,6 +225,8 @@ export class ReplicationManager {
     return {
       partition,
       leader: meta.leader,
+      leaderEpoch: meta.leaderEpoch,
+      status: meta.status,
       replicas: meta.replicas,
       replicationFactor: meta.replicationFactor,
       replicaStates: replicaStatesObj,
@@ -154,11 +252,22 @@ export class ReplicationManager {
    * 
    * @param {string} topic 
    * @param {number} partition 
-   * @returns {string}
+   * @returns {string|null}
    */
   getLeader(topic, partition) {
     const meta = this.partitionMetadata.get(`${topic}:${partition}`);
     return meta ? meta.leader : this.localBrokerId;
+  }
+
+  /**
+   * Gets current leader epoch for a partition.
+   * @param {string} topic 
+   * @param {number} partition 
+   * @returns {number}
+   */
+  getLeaderEpoch(topic, partition) {
+    const meta = this.partitionMetadata.get(`${topic}:${partition}`);
+    return meta ? meta.leaderEpoch : 1;
   }
 
   /**
@@ -355,7 +464,7 @@ export class ReplicationManager {
    */
   async syncFollowerPartition(topic, partitionId) {
     const leaderId = this.getLeader(topic, partitionId);
-    if (leaderId === this.localBrokerId) return; // Local node is leader
+    if (!leaderId || leaderId === this.localBrokerId) return; // Local node is leader or no leader
 
     const leaderNode = this.clusterManager.nodes.get(leaderId);
     if (!leaderNode || leaderNode.status === 'down') return;
@@ -393,6 +502,12 @@ export class ReplicationManager {
             for (const rec of records) {
               partition.enqueueWithOffset(rec.offset, rec.message);
               this.storageEngine.appendMessage(topic, partitionId, rec.offset, rec.message);
+            }
+            const pKey = `${topic}:${partitionId}`;
+            const states = this.replicaStates.get(pKey);
+            if (states && states.has(this.localBrokerId)) {
+              states.get(this.localBrokerId).status = 'CAUGHT_UP';
+              states.get(this.localBrokerId).lastReplicatedOffset = partition.nextOffset - 1;
             }
             socket.end();
             return resolve(true);

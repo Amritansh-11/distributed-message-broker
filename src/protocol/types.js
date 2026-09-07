@@ -24,7 +24,8 @@ export const REQUEST_TYPES = {
   REPLICATE_RECORD: 'REPLICATE_RECORD',
   REPLICATE_ACK: 'REPLICATE_ACK',
   REPLICA_SYNC: 'REPLICA_SYNC',
-  REPLICA_SYNC_RESPONSE: 'REPLICA_SYNC_RESPONSE'
+  REPLICA_SYNC_RESPONSE: 'REPLICA_SYNC_RESPONSE',
+  LEADER_ANNOUNCE: 'LEADER_ANNOUNCE'
 };
 
 export const RESPONSE_TYPES = {
@@ -46,6 +47,7 @@ export const RESPONSE_TYPES = {
   BROKER_PONG: 'BROKER_PONG',
   REPLICATE_ACK: 'REPLICATE_ACK',
   REPLICA_SYNC_RESPONSE: 'REPLICA_SYNC_RESPONSE',
+  LEADER_ANNOUNCE_ACK: 'LEADER_ANNOUNCE_ACK',
   ERROR: 'ERROR'
 };
 
@@ -210,6 +212,18 @@ export const ProtocolRequest = {
       topic,
       partition,
       records
+    }
+  }),
+
+  leaderAnnounce: (topic, partition, leader, leaderEpoch, replicas = [], requestId) => ({
+    ...(requestId && { requestId }),
+    type: REQUEST_TYPES.LEADER_ANNOUNCE,
+    payload: {
+      topic,
+      partition,
+      leader,
+      leaderEpoch,
+      replicas
     }
   })
 };
@@ -394,6 +408,18 @@ export const ProtocolResponse = {
       topic,
       partition,
       records
+    }
+  }),
+
+  leaderAnnounceAck: (topic, partition, leader, leaderEpoch, requestId) => ({
+    ...(requestId && { requestId }),
+    type: RESPONSE_TYPES.LEADER_ANNOUNCE_ACK,
+    success: true,
+    payload: {
+      topic,
+      partition,
+      leader,
+      leaderEpoch
     }
   }),
 

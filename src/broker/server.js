@@ -1,263 +1,323 @@
+/**
+ * BrokerServer — Production TCP Message Broker Server & Management Server
+ * 
+ * Manages TCP server socket lifecycle, inter-broker handshakes, structured logging,
+ * metrics collection, HTTP management endpoints (/metrics, /health, /cluster),
+ * and graceful SIGINT/SIGTERM shutdown sequence.
+ */
+
 import net from 'net';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { StreamFramer } from '../protocol/framing.js';
 import { ProtocolDecoder, ProtocolEncoder } from '../protocol/codec.js';
 import { RequestValidator } from '../protocol/validator.js';
-import { ProtocolResponse, REQUEST_TYPES } from '../protocol/types.js';
 import { MessageBroker } from './broker.js';
+import { ProtocolResponse, REQUEST_TYPES } from '../protocol/types.js';
+import { ConfigLoader } from '../config/config.js';
+import { logger } from '../utils/logger.js';
+import { metricsCollector } from '../metrics/metrics-collector.js';
+import { ManagementServer } from '../server/management-server.js';
 
 export class BrokerServer {
   /**
-   * @param {number | object} [portOrOptions=5000] 
-   * @param {string} [host='127.0.0.1'] 
-   * @param {object} [options={}]
+   * @param {object|number} [options={}] - Options object or listening port number
+   * @param {string} [hostArg='127.0.0.1'] - Listening host string if first arg is port number
+   * @param {object} [optionsArg={}] - Additional options if first arg is port number
    */
-  constructor(portOrOptions = 5000, host = '127.0.0.1', options = {}) {
-    let brokerOptions = {};
-    if (typeof portOrOptions === 'object' && portOrOptions !== null) {
-      this.port = portOrOptions.port || 5000;
-      this.host = portOrOptions.host || '127.0.0.1';
-      brokerOptions = portOrOptions;
-    } else {
-      this.port = portOrOptions;
-      this.host = host;
-      brokerOptions = { port: this.port, host: this.host, ...options };
+  constructor(options = {}, hostArg, optionsArg) {
+    let opts = options;
+    if (typeof options === 'number') {
+      const portNum = options;
+      const hostStr = typeof hostArg === 'string' ? hostArg : '127.0.0.1';
+      const extraOpts = typeof optionsArg === 'object' && optionsArg !== null ? optionsArg : {};
+      opts = { port: portNum, host: hostStr, ...extraOpts };
     }
 
-    this.brokerId = brokerOptions.brokerId || process.env.BROKER_ID || 'broker-1';
-    brokerOptions.brokerId = this.brokerId;
-    brokerOptions.port = this.port;
-    brokerOptions.host = this.host;
+    const envConfig = ConfigLoader.loadConfig();
+    this.port = Number(opts.port) || envConfig.port;
+    this.host = opts.host || envConfig.host;
+    this.httpPort = Number(opts.httpPort) || (this.port + 3000);
+    this.brokerId = opts.brokerId || envConfig.brokerId;
 
-    this.broker = new MessageBroker(brokerOptions);
+    logger.setBrokerId(this.brokerId);
+    if (opts.logLevel || envConfig.logLevel) {
+      logger.setLevel(opts.logLevel || envConfig.logLevel);
+    }
+
+    this.broker = opts.broker || new MessageBroker({ ...envConfig, ...opts, port: this.port, host: this.host, brokerId: this.brokerId });
     this.server = null;
     this.connections = new Set();
+    this.managementServer = opts.managementServer || new ManagementServer({
+      port: this.httpPort,
+      host: this.host === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0',
+      brokerId: this.brokerId,
+      broker: this.broker
+    });
+    this.stopping = false;
   }
 
   /**
-   * Helper accessor to access ClusterManager.
+   * Exposes clusterManager from underlying broker instance.
    */
   get clusterManager() {
-    return this.broker.clusterManager;
+    return this.broker ? this.broker.clusterManager : null;
   }
 
   /**
-   * Helper accessor to access ReplicationManager.
-   */
-  get replicationManager() {
-    return this.broker.replicationManager;
-  }
-
-  /**
-   * Starts the TCP Broker server after completing disk state recovery
-   * and starting cluster manager inter-broker communication.
-   * 
+   * Starts TCP broker server and HTTP management server.
    * @returns {Promise<void>}
    */
-  async start() {
-    // Perform disk state recovery before listening for TCP connections
-    try {
-      this.broker.recover();
-    } catch (err) {
-      console.error(`[Broker Server Error] Disk state recovery failed: ${err.message}`);
-      throw err;
-    }
-
-    // Start cluster manager inter-broker heartbeat loop & connections
-    this.clusterManager.start();
-
+  start() {
     return new Promise((resolve, reject) => {
-      this.server = net.createServer((socket) => {
-        this._handleConnection(socket);
-      });
+      // Recover persistent storage state on server startup
+      if (this.broker && typeof this.broker.recover === 'function') {
+        try {
+          this.broker.recover();
+        } catch (err) {
+          logger.warn('Storage recovery warning', { error: err.message });
+        }
+      }
+
+      this.server = net.createServer((socket) => this._handleConnection(socket));
 
       this.server.on('error', (err) => {
-        console.error(`[Broker Server Error] ${err.message}`);
+        logger.error('Broker TCP server error', { error: err.message });
         reject(err);
       });
 
-      this.server.listen(this.port, this.host, () => {
+      this.server.listen(this.port, this.host, async () => {
+        logger.info('TCP Message Broker listening', { port: this.port, host: this.host });
         console.log(`[Broker ${this.brokerId}] TCP Message Broker listening on tcp://${this.host}:${this.port}`);
+
+        // Start cluster heartbeats and inter-broker connections
+        if (this.broker.clusterManager) {
+          this.broker.clusterManager.start();
+        }
+
+        // Start HTTP management observability server
+        try {
+          await this.managementServer.start();
+        } catch (err) {
+          logger.warn('HTTP Management server failed to start', { error: err.message });
+        }
+
         resolve();
       });
     });
   }
 
   /**
-   * Gracefully stops the broker server and destroys active client sockets.
-   * @returns {Promise<void>}
-   */
-  stop() {
-    return new Promise((resolve) => {
-      this.clusterManager.stop();
-
-      if (!this.server) return resolve();
-
-      for (const socket of this.connections) {
-        socket.destroy();
-      }
-      this.connections.clear();
-
-      this.server.close(() => {
-        console.log(`[Broker ${this.brokerId}] Broker server shut down gracefully`);
-        resolve();
-      });
-    });
-  }
-
-  /**
-   * Handles TCP socket connection pipeline.
-   * Pipeline: TCP -> Framing -> Decoder -> Validator -> (Cluster / Broker Engine) -> Encoder -> TCP
-   * 
+   * Handles individual TCP socket connection lifecycle.
    * @param {net.Socket} socket 
    */
   _handleConnection(socket) {
-    const clientAddr = `${socket.remoteAddress}:${socket.remotePort}`;
+    if (this.stopping) {
+      socket.destroy();
+      return;
+    }
 
+    const clientAddr = `${socket.remoteAddress}:${socket.remotePort}`;
     this.connections.add(socket);
+    metricsCollector.increment('connections_total');
+    metricsCollector.increment('active_connections');
+
     const framer = new StreamFramer();
 
     socket.on('data', async (chunk) => {
-      const frames = framer.feed(chunk);
+      let frames;
+      try {
+        frames = framer.feed(chunk);
+      } catch (err) {
+        logger.warn('Framing error from client', { remoteBroker: clientAddr, error: err.message });
+        const errResp = ProtocolEncoder.encode(ProtocolResponse.error(err.message));
+        socket.write(errResp);
+        socket.destroy();
+        return;
+      }
 
       for (const frame of frames) {
-        // 1. Framing error (e.g. max frame size exceeded)
         if (frame.error) {
-          console.warn(`[Broker] Framing error from ${clientAddr}: ${frame.error.message}`);
-          this._sendResponse(socket, ProtocolResponse.error(frame.error.message));
+          logger.warn('Frame error from client', { remoteBroker: clientAddr, error: frame.error });
+          const errResp = ProtocolEncoder.encode(ProtocolResponse.error(frame.error));
+          socket.write(errResp);
           continue;
         }
 
-        // 2. Decoder (Parse raw wire payload)
         const decoded = ProtocolDecoder.decode(frame.raw);
         if (decoded.error) {
-          console.warn(`[Broker] Decoding error from ${clientAddr}: ${decoded.error.message}`);
-          this._sendResponse(socket, ProtocolResponse.error(decoded.error.message));
+          logger.warn('Protocol decode error from client', { remoteBroker: clientAddr, error: decoded.error });
+          const errResp = ProtocolEncoder.encode(ProtocolResponse.error(decoded.error));
+          socket.write(errResp);
           continue;
         }
 
-        // 3. Request Validator (Check request structure and bounds)
         const validation = RequestValidator.validate(decoded.parsed);
         if (!validation.valid) {
-          console.warn(`[Broker] Request validation failed from ${clientAddr}: ${validation.error}`);
-          this._sendResponse(socket, ProtocolResponse.error(validation.error));
+          logger.warn('Request validation error from client', { remoteBroker: clientAddr, error: validation.error });
+          const errResp = ProtocolEncoder.encode(ProtocolResponse.error(validation.error));
+          socket.write(errResp);
           continue;
         }
 
-        const req = decoded.parsed;
-        const uppercaseType = req.type.toUpperCase();
+        const reqObj = decoded.parsed;
+        const uppercaseType = reqObj.type.toUpperCase();
 
-        // 4A. Inter-Broker Protocol Messages (BROKER_HELLO / BROKER_PING)
-        if (uppercaseType === REQUEST_TYPES.BROKER_HELLO) {
-          const { brokerId, host, port } = req.payload;
-          const responseObj = this.clusterManager.handleIncomingHello(brokerId, host, port, socket);
-          this._sendResponse(socket, responseObj);
+        // Handle inter-broker handshakes directly
+        if (uppercaseType === REQUEST_TYPES.BROKER_HELLO && this.broker.clusterManager) {
+          const { brokerId, host, port } = reqObj.payload;
+          const res = this.broker.clusterManager.handleIncomingHello(brokerId, host, port, socket);
+          socket.write(ProtocolEncoder.encode(res));
           continue;
         }
 
-        if (uppercaseType === REQUEST_TYPES.BROKER_PING) {
-          const { brokerId } = req.payload;
-          const responseObj = this.clusterManager.handleIncomingPing(brokerId);
-          this._sendResponse(socket, responseObj);
+        if (uppercaseType === REQUEST_TYPES.BROKER_PING && this.broker.clusterManager) {
+          const { brokerId } = reqObj.payload;
+          const res = this.broker.clusterManager.handleIncomingPing(brokerId);
+          socket.write(ProtocolEncoder.encode(res));
           continue;
         }
 
-        // 4B. Inter-Broker Replication Messages (REPLICATE_RECORD / REPLICA_SYNC)
-        if (uppercaseType === REQUEST_TYPES.REPLICATE_RECORD) {
-          const { topic, partition, offset, message } = req.payload;
-          const responseObj = this.replicationManager.handleIncomingReplicateRecord(topic, partition, offset, message);
-          this._sendResponse(socket, responseObj);
+        if (uppercaseType === REQUEST_TYPES.REPLICATE_RECORD && this.broker.replicationManager) {
+          const { topic, partition, offset, message } = reqObj.payload;
+          const res = this.broker.replicationManager.handleIncomingReplicateRecord(topic, partition, offset, message);
+          socket.write(ProtocolEncoder.encode(res));
           continue;
         }
 
-        if (uppercaseType === REQUEST_TYPES.REPLICA_SYNC) {
-          const { brokerId, topic, partition, fromOffset } = req.payload;
-          const responseObj = this.replicationManager.handleIncomingReplicaSync(brokerId, topic, partition, fromOffset);
-          this._sendResponse(socket, responseObj);
+        if (uppercaseType === REQUEST_TYPES.REPLICA_SYNC && this.broker.replicationManager) {
+          const { brokerId, topic, partition, fromOffset } = reqObj.payload;
+          const res = this.broker.replicationManager.handleIncomingReplicaSync(brokerId, topic, partition, fromOffset);
+          socket.write(ProtocolEncoder.encode(res));
           continue;
         }
 
-        // 4C. Core Message Broker Domain Engine
-        const responseObj = await this.broker.handleRequest(req, clientAddr);
+        if (uppercaseType === REQUEST_TYPES.LEADER_ANNOUNCE && this.broker.leaderElectionManager) {
+          const { topic, partition, leader, leaderEpoch, replicas } = reqObj.payload;
+          const res = this.broker.leaderElectionManager.handleLeaderAnnounce(topic, partition, leader, leaderEpoch, replicas);
+          socket.write(ProtocolEncoder.encode(res));
+          continue;
+        }
 
-        // 5. Encoder & Framing -> Write to TCP Socket
-        this._sendResponse(socket, responseObj);
+        // Metrics tracking for PRODUCE and CONSUME
+        const startTime = Date.now();
+        const responseObj = await this.broker.handleRequest(reqObj, clientAddr);
+        const durationMs = Date.now() - startTime;
+
+        if (uppercaseType === REQUEST_TYPES.PRODUCE) {
+          if (responseObj.success) {
+            metricsCollector.increment('messages_produced_total');
+            metricsCollector.recordLatency('produce', durationMs);
+          } else {
+            metricsCollector.increment('produce_errors_total');
+          }
+        } else if (uppercaseType === REQUEST_TYPES.CONSUME) {
+          if (responseObj.success) {
+            metricsCollector.increment('messages_consumed_total');
+            metricsCollector.recordLatency('consume', durationMs);
+          } else {
+            metricsCollector.increment('consume_errors_total');
+          }
+        }
+
+        const encodedResp = ProtocolEncoder.encode(responseObj);
+        socket.write(encodedResp);
       }
     });
 
     const cleanup = () => {
       if (this.connections.has(socket)) {
         this.connections.delete(socket);
+        metricsCollector.decrement('active_connections');
       }
     };
 
     socket.on('close', cleanup);
     socket.on('error', (err) => {
-      console.error(`[Broker] Socket error on ${clientAddr}: ${err.message}`);
       cleanup();
     });
   }
 
   /**
-   * Encodes response object and sends to client socket.
-   * @param {net.Socket} socket 
-   * @param {object} responseObj 
+   * Gracefully shuts down the TCP server, HTTP management server, flushes pending storage,
+   * and closes all client connections.
+   * @returns {Promise<void>}
    */
-  _sendResponse(socket, responseObj) {
-    if (socket.writable) {
-      const wireData = ProtocolEncoder.encode(responseObj);
-      socket.write(wireData);
-    }
-  }
+  stop() {
+    if (this.stopping) return Promise.resolve();
+    this.stopping = true;
 
-  /**
-   * Helper accessor to access topicManager directly in tests
-   */
-  get topicManager() {
-    return this.broker.topicManager;
+    return new Promise((resolve) => {
+      logger.info('Shutting down BrokerServer gracefully...', { brokerId: this.brokerId });
+
+      // Stop management HTTP server
+      if (this.managementServer) {
+        this.managementServer.stop().catch(() => {});
+      }
+
+      // Flush pending storage log buffers to disk
+      if (this.broker && this.broker.storageEngine) {
+        try {
+          this.broker.storageEngine.flushAll();
+        } catch (err) {
+          logger.warn('Error flushing storage on shutdown', { error: err.message });
+        }
+      }
+
+      // Clear in-memory broker state and stop cluster heartbeats
+      if (this.broker) {
+        this.broker.clear();
+      }
+
+      // Destroy open client TCP sockets
+      for (const socket of this.connections) {
+        try {
+          socket.destroy();
+        } catch (err) {}
+      }
+      this.connections.clear();
+
+      // Close TCP server
+      if (this.server) {
+        this.server.close(() => {
+          logger.info('Broker server shut down gracefully', { brokerId: this.brokerId });
+          console.log(`[Broker ${this.brokerId}] Broker server shut down gracefully`);
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
   }
 }
 
-// Start broker if executed directly via CLI
-const isDirectExecution = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
-if (isDirectExecution) {
-  // Parse CLI args e.g. --id=broker-1 --port=5000 --host=127.0.0.1 --dataDir=./data/broker-1 --config=cluster.json
-  const args = process.argv.slice(2);
-  let brokerId = process.env.BROKER_ID || 'broker-1';
-  let port = process.env.BROKER_PORT ? parseInt(process.env.BROKER_PORT, 10) : 5000;
-  let host = process.env.BROKER_HOST || '127.0.0.1';
-  let dataDir = process.env.DATA_DIR;
-  let clusterConfig = null;
+// CLI Execution Entry Point
+const currentFilePath = fileURLToPath(import.meta.url);
+const entryFilePath = process.argv[1] ? path.resolve(process.argv[1]) : '';
 
-  for (const arg of args) {
-    if (arg.startsWith('--id=')) brokerId = arg.replace('--id=', '');
-    if (arg.startsWith('--port=')) port = parseInt(arg.replace('--port=', ''), 10);
-    if (arg.startsWith('--host=')) host = arg.replace('--host=', '');
-    if (arg.startsWith('--dataDir=')) dataDir = arg.replace('--dataDir=', '');
-    if (arg.startsWith('--config=')) {
-      const configPath = arg.replace('--config=', '');
-      if (fs.existsSync(configPath)) {
-        clusterConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      }
-    }
+if (entryFilePath && (currentFilePath === entryFilePath || entryFilePath.endsWith('server.js'))) {
+  const cliArgs = {};
+  for (const arg of process.argv.slice(2)) {
+    if (arg.startsWith('--id=')) cliArgs.brokerId = arg.split('=')[1];
+    if (arg.startsWith('--port=')) cliArgs.port = Number(arg.split('=')[1]);
+    if (arg.startsWith('--host=')) cliArgs.host = arg.split('=')[1];
+    if (arg.startsWith('--http-port=')) cliArgs.httpPort = Number(arg.split('=')[1]);
+    if (arg.startsWith('--log-level=')) cliArgs.logLevel = arg.split('=')[1];
   }
 
-  const broker = new BrokerServer({ brokerId, port, host, dataDir, clusterConfig });
-  broker.start().catch((err) => {
-    console.error(`Failed to start broker ${brokerId}:`, err);
-    process.exit(1);
-  });
-
-  const shutdown = async () => {
-    console.log(`\n[Broker ${brokerId}] Shutting down broker...`);
-    await broker.stop();
+  const server = new BrokerServer(cliArgs);
+  
+  const shutdown = async (signal) => {
+    console.log(`\nReceived ${signal}. Initiating graceful shutdown...`);
+    await server.stop();
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-}
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-export { BrokerServer as Server };
+  server.start().catch((err) => {
+    console.error(`Failed to start broker: ${err.message}`);
+    process.exit(1);
+  });
+}

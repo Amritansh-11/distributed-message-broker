@@ -5,7 +5,7 @@
  * the core Message Broker domain engine.
  */
 
-import { REQUEST_TYPES } from './types.js';
+import { REQUEST_TYPES, RESPONSE_TYPES } from './types.js';
 import { TopicManager } from '../broker/topic-manager.js';
 
 export class RequestValidator {
@@ -31,7 +31,7 @@ export class RequestValidator {
     }
 
     const uppercaseType = request.type.toUpperCase();
-    const validTypes = Object.values(REQUEST_TYPES);
+    const validTypes = [...Object.values(REQUEST_TYPES), ...Object.values(RESPONSE_TYPES)];
 
     if (!validTypes.includes(uppercaseType)) {
       return {
@@ -55,6 +55,12 @@ export class RequestValidator {
       case REQUEST_TYPES.PING:
       case REQUEST_TYPES.LIST_TOPICS:
       case REQUEST_TYPES.GET_CLUSTER_INFO:
+      case RESPONSE_TYPES.PONG:
+      case RESPONSE_TYPES.BROKER_HELLO_ACK:
+      case RESPONSE_TYPES.BROKER_PONG:
+      case RESPONSE_TYPES.REPLICATE_ACK:
+      case RESPONSE_TYPES.REPLICA_SYNC_RESPONSE:
+      case RESPONSE_TYPES.LEADER_ANNOUNCE_ACK:
         return { valid: true };
 
       case REQUEST_TYPES.CREATE_TOPIC: {
@@ -344,6 +350,19 @@ export class RequestValidator {
         if (!topic || typeof topic !== 'string') return { valid: false, error: 'REPLICA_SYNC must include "topic"' };
         if (partition === undefined || typeof partition !== 'number') return { valid: false, error: 'REPLICA_SYNC must include "partition"' };
         if (fromOffset === undefined || typeof fromOffset !== 'number' || fromOffset < 0) return { valid: false, error: 'REPLICA_SYNC must include non-negative "fromOffset"' };
+        return { valid: true };
+      }
+
+      case REQUEST_TYPES.LEADER_ANNOUNCE: {
+        const topic = getField('topic');
+        const partition = getField('partition');
+        const leader = getField('leader');
+        const leaderEpoch = getField('leaderEpoch');
+
+        if (!topic || typeof topic !== 'string') return { valid: false, error: 'LEADER_ANNOUNCE must include "topic"' };
+        if (partition === undefined || typeof partition !== 'number' || partition < 0) return { valid: false, error: 'LEADER_ANNOUNCE must include valid "partition"' };
+        if (!leader || typeof leader !== 'string') return { valid: false, error: 'LEADER_ANNOUNCE must include string "leader"' };
+        if (leaderEpoch === undefined || typeof leaderEpoch !== 'number' || leaderEpoch < 0) return { valid: false, error: 'LEADER_ANNOUNCE must include integer "leaderEpoch"' };
         return { valid: true };
       }
 

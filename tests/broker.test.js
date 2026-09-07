@@ -89,7 +89,7 @@ async function runTests() {
     const produceRes = await sendCommand({ requestId: 'req-3', type: 'PRODUCE', payload: { topic: 'orders', message: 'Hello Distributed Systems' } });
     assert(produceRes && produceRes.parsed && produceRes.parsed.type === 'PRODUCE_ACK', 'Broker responds with PRODUCE_ACK');
     assert(produceRes.parsed.success === true, 'PRODUCE_ACK indicates success');
-    assert(broker.topicManager.getTopicInfo('orders').messageCount === 1, 'Broker stores message in topic queue');
+    assert(broker.broker.topicManager.getTopicInfo('orders').messageCount === 1, 'Broker stores message in topic queue');
 
     // TEST 6: Consume Message (Message exists)
     console.log('\n--- TEST 6: Consume Message from Topic ---');

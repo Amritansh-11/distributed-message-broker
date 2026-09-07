@@ -4,6 +4,8 @@ import { ConsumerGroupManager } from './consumer-group-manager.js';
 import { StorageEngine } from '../storage/storage-engine.js';
 import { ClusterManager } from '../cluster/cluster-manager.js';
 import { ReplicationManager } from '../cluster/replication-manager.js';
+import { LeaderElectionManager } from '../cluster/leader-election-manager.js';
+import { logger } from '../utils/logger.js';
 import path from 'path';
 
 export class MessageBroker {
@@ -12,6 +14,7 @@ export class MessageBroker {
    * @param {StorageEngine} [options.storageEngine]
    * @param {ClusterManager} [options.clusterManager]
    * @param {ReplicationManager} [options.replicationManager]
+   * @param {LeaderElectionManager} [options.leaderElectionManager]
    * @param {object} [options.storageConfig]
    * @param {string} [options.brokerId='broker-1']
    * @param {string} [options.dataDir]
@@ -40,6 +43,12 @@ export class MessageBroker {
       clusterManager: this.clusterManager,
       topicManager: this.topicManager,
       storageEngine: this.storageEngine
+    });
+    /** @type {LeaderElectionManager} Partition leader election and failover manager */
+    this.leaderElectionManager = options.leaderElectionManager || new LeaderElectionManager({
+      clusterManager: this.clusterManager,
+      replicationManager: this.replicationManager,
+      topicManager: this.topicManager
     });
   }
 
@@ -88,7 +97,7 @@ export class MessageBroker {
 
       case REQUEST_TYPES.GET_CLUSTER_INFO: {
         const brokersList = this.clusterManager.getClusterInfo();
-        console.log(`[Broker] Cluster info requested by ${clientAddr}: ${brokersList.length} broker(s)`);
+        logger.debug('Cluster info requested', { remoteBroker: clientAddr, count: brokersList.length });
         return ProtocolResponse.clusterInfo(brokersList, requestId);
       }
 
@@ -111,17 +120,17 @@ export class MessageBroker {
           for (let p = 0; p < result.partitions; p++) {
             this.storageEngine.ensurePartitionDir(topic, p);
           }
-          console.log(`[Broker] Created topic "${topic}" with ${result.partitions} partition(s), replicationFactor=${repFactor} requested by ${clientAddr}`);
+          logger.info('Created topic', { topic, partitions: result.partitions, replicationFactor: repFactor, remoteBroker: clientAddr });
           return ProtocolResponse.createTopicAck(topic, result.partitions, repFactor, requestId);
         } else {
-          console.warn(`[Broker] Failed to create topic "${topic}" for ${clientAddr}: ${result.message}`);
+          logger.warn('Failed to create topic', { topic, error: result.message, remoteBroker: clientAddr });
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
         }
       }
 
       case REQUEST_TYPES.LIST_TOPICS: {
         const topicsList = this.topicManager.listTopics();
-        console.log(`[Broker] Listing ${topicsList.length} topic(s) for ${clientAddr}`);
+        logger.debug('Listing topics', { count: topicsList.length, remoteBroker: clientAddr });
         return ProtocolResponse.topics(topicsList, requestId);
       }
 
@@ -133,12 +142,14 @@ export class MessageBroker {
               const pMeta = this.replicationManager.getPartitionMetadata(topic, pInfo.partition);
               if (pMeta) {
                 pInfo.leader = pMeta.leader;
+                pInfo.leaderEpoch = pMeta.leaderEpoch;
+                pInfo.status = pMeta.status;
                 pInfo.replicas = pMeta.replicas;
                 pInfo.highWaterMark = pMeta.highWaterMark;
               }
             }
           }
-          console.log(`[Broker] Topic info for "${topic}" requested by ${clientAddr}: ${result.messageCount} total message(s) across ${result.partitions} partition(s)`);
+          logger.debug('Topic info requested', { topic, totalMessages: result.messageCount, remoteBroker: clientAddr });
           return ProtocolResponse.topicInfo(result, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -151,10 +162,12 @@ export class MessageBroker {
           const pMeta = this.replicationManager.getPartitionMetadata(topic, partition);
           if (pMeta) {
             result.leader = pMeta.leader;
+            result.leaderEpoch = pMeta.leaderEpoch;
+            result.status = pMeta.status;
             result.replicas = pMeta.replicas;
             result.highWaterMark = pMeta.highWaterMark;
           }
-          console.log(`[Broker] Partition info for "${topic}" partition ${partition} requested by ${clientAddr}: ${result.messageCount} message(s), nextOffset: ${result.nextOffset}`);
+          logger.debug('Partition info requested', { topic, partition, messageCount: result.messageCount, remoteBroker: clientAddr });
           return ProtocolResponse.partitionInfo(topic, result.partition, result.messageCount, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -164,17 +177,17 @@ export class MessageBroker {
       case REQUEST_TYPES.DELETE_TOPIC: {
         const result = this.topicManager.deleteTopic(topic);
         if (result.success) {
-          console.log(`[Broker] Deleted topic "${topic}" requested by ${clientAddr}`);
+          logger.info('Deleted topic', { topic, remoteBroker: clientAddr });
           return ProtocolResponse.deleteTopicAck(topic, requestId);
         } else {
-          console.warn(`[Broker] Failed to delete topic "${topic}" for ${clientAddr}: ${result.message}`);
+          logger.warn('Failed to delete topic', { topic, error: result.message, remoteBroker: clientAddr });
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
         }
       }
 
       case REQUEST_TYPES.PRODUCE: {
         if (!this.topicManager.hasTopic(topic)) {
-          console.warn(`[Broker] PRODUCE failed: Topic "${topic}" does not exist`);
+          logger.warn('PRODUCE failed: Topic not found', { topic });
           return ProtocolResponse.error({
             code: 'TOPIC_NOT_FOUND',
             message: `Topic '${topic}' does not exist`
@@ -192,22 +205,33 @@ export class MessageBroker {
         }
         const targetPartition = selection.partitionId;
 
+        // Partition Available Check
+        if (this.replicationManager.getPartitionStatus(topic, targetPartition) === 'NO_LEADER') {
+          logger.warn('PRODUCE rejected: NO_LEADER', { topic, partition: targetPartition });
+          return ProtocolResponse.error({
+            code: 'PARTITION_UNAVAILABLE',
+            message: `Partition '${topic}' partition ${targetPartition} has no available leader`
+          }, requestId);
+        }
+
         // Leader Write Enforcement Check
         if (!this.replicationManager.isLeader(topic, targetPartition)) {
           const leaderId = this.replicationManager.getLeader(topic, targetPartition);
-          console.warn(`[Broker] PRODUCE rejected: Local broker '${this.brokerId}' is NOT_LEADER for '${topic}' partition ${targetPartition} (Leader: '${leaderId}')`);
+          const leaderEpoch = this.replicationManager.getLeaderEpoch(topic, targetPartition);
+          logger.warn('PRODUCE rejected: NOT_LEADER', { topic, partition: targetPartition, leader: leaderId, leaderEpoch });
           return ProtocolResponse.error({
             code: 'NOT_LEADER',
             message: `Broker '${this.brokerId}' is not the leader for topic '${topic}' partition ${targetPartition}`,
             topic,
             partition: targetPartition,
-            leader: leaderId
+            leader: leaderId,
+            leaderEpoch
           }, requestId);
         }
 
         const enqueueResult = this.topicManager.enqueue(topic, message, targetPartition, key);
         if (!enqueueResult.success) {
-          console.warn(`[Broker] PRODUCE failed on topic "${topic}": ${enqueueResult.message}`);
+          logger.warn('PRODUCE failed', { topic, partition: targetPartition, error: enqueueResult.message });
           return ProtocolResponse.error({
             code: enqueueResult.code,
             message: enqueueResult.message
@@ -218,7 +242,7 @@ export class MessageBroker {
         try {
           this.storageEngine.appendMessage(topic, enqueueResult.partitionId, enqueueResult.offset, message);
         } catch (err) {
-          console.error(`[Broker Storage Error] Failed to persist message to disk: ${err.message}`);
+          logger.error('Failed to persist message to disk', { topic, partition: enqueueResult.partitionId, offset: enqueueResult.offset, error: err.message });
           return ProtocolResponse.error({
             code: 'STORAGE_ERROR',
             message: `Failed to persist message to disk: ${err.message}`
@@ -228,28 +252,53 @@ export class MessageBroker {
         // Replicate record to follower replicas over inter-broker TCP
         await this.replicationManager.replicateToFollowers(topic, enqueueResult.partitionId, enqueueResult.offset, message, key);
 
-        console.log(`[Broker] Produced message to "${topic}" (partition: ${enqueueResult.partitionId}, offset: ${enqueueResult.offset}) from ${clientAddr}: "${message}"`);
+        logger.debug('Produced message', { topic, partition: enqueueResult.partitionId, offset: enqueueResult.offset, remoteBroker: clientAddr });
         return ProtocolResponse.produceAck(topic, enqueueResult.partitionId, enqueueResult.offset, requestId);
       }
 
       case REQUEST_TYPES.CONSUME: {
         if (!this.topicManager.hasTopic(topic)) {
-          console.warn(`[Broker] CONSUME failed: Topic "${topic}" does not exist`);
+          logger.warn('CONSUME failed: Topic not found', { topic });
           return ProtocolResponse.error({
             code: 'TOPIC_NOT_FOUND',
             message: `Topic '${topic}' does not exist`
           }, requestId);
         }
 
+        const targetPartition = partition ?? 0;
+
+        // Partition Available Check
+        if (this.replicationManager.getPartitionStatus(topic, targetPartition) === 'NO_LEADER') {
+          logger.warn('CONSUME rejected: NO_LEADER', { topic, partition: targetPartition });
+          return ProtocolResponse.error({
+            code: 'PARTITION_UNAVAILABLE',
+            message: `Partition '${topic}' partition ${targetPartition} has no available leader`
+          }, requestId);
+        }
+
+        // Leader Read Enforcement Check
+        if (!this.replicationManager.isLeader(topic, targetPartition)) {
+          const leaderId = this.replicationManager.getLeader(topic, targetPartition);
+          const leaderEpoch = this.replicationManager.getLeaderEpoch(topic, targetPartition);
+          logger.warn('CONSUME rejected: NOT_LEADER', { topic, partition: targetPartition, leader: leaderId });
+          return ProtocolResponse.error({
+            code: 'NOT_LEADER',
+            message: `Broker '${this.brokerId}' is not the leader for topic '${topic}' partition ${targetPartition}`,
+            topic,
+            partition: targetPartition,
+            leader: leaderId,
+            leaderEpoch
+          }, requestId);
+        }
+
         // Case 1: Consume by explicit offset
         if (offset !== undefined && offset !== null) {
-          const targetPartition = partition ?? 0;
           const readRes = this.topicManager.readOffset(topic, targetPartition, offset);
           if (readRes.success) {
-            console.log(`[Broker] Consumed message at explicit offset ${offset} from "${topic}" (partition: ${targetPartition}) for ${clientAddr}`);
+            logger.debug('Consumed message at explicit offset', { topic, partition: targetPartition, offset: readRes.offset, remoteBroker: clientAddr });
             return ProtocolResponse.message(topic, readRes.message, targetPartition, readRes.offset, requestId);
           } else {
-            console.warn(`[Broker] CONSUME by offset ${offset} failed on topic "${topic}": ${readRes.message}`);
+            logger.warn('CONSUME by offset failed', { topic, partition: targetPartition, offset, error: readRes.message });
             return ProtocolResponse.error({
               code: readRes.code,
               message: readRes.message
@@ -268,7 +317,7 @@ export class MessageBroker {
           }
 
           if (groupRes.message !== null) {
-            console.log(`[Broker] Group "${groupId}" (${consumerId}) consumed message from "${topic}" (partition: ${groupRes.partition}, offset: ${groupRes.offset}) for ${clientAddr}`);
+            logger.debug('Group consumed message', { groupId, consumerId, topic, partition: groupRes.partition, offset: groupRes.offset, remoteBroker: clientAddr });
             return ProtocolResponse.message(topic, groupRes.message, groupRes.partition, groupRes.offset, requestId);
           } else {
             return ProtocolResponse.noMessages(topic, groupRes.partition, requestId);
@@ -285,7 +334,7 @@ export class MessageBroker {
         }
 
         if (dequeueResult.message !== null) {
-          console.log(`[Broker] Legacy consumed message from "${topic}" (partition: ${dequeueResult.partitionId}, offset: ${dequeueResult.offset}) for ${clientAddr}`);
+          logger.debug('Legacy consumed message', { topic, partition: dequeueResult.partitionId, offset: dequeueResult.offset, remoteBroker: clientAddr });
           return ProtocolResponse.message(topic, dequeueResult.message, dequeueResult.partitionId, dequeueResult.offset, requestId);
         } else {
           return ProtocolResponse.noMessages(topic, dequeueResult.partitionId, requestId);
@@ -295,7 +344,7 @@ export class MessageBroker {
       case REQUEST_TYPES.JOIN_GROUP: {
         const result = this.consumerGroupManager.joinGroup(groupId, consumerId, topics);
         if (result.success) {
-          console.log(`[Broker] Consumer "${consumerId}" joined group "${groupId}" from ${clientAddr}`);
+          logger.info('Consumer joined group', { groupId, consumerId, remoteBroker: clientAddr });
           return ProtocolResponse.joinGroupAck(groupId, consumerId, result.assignments, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -305,7 +354,7 @@ export class MessageBroker {
       case REQUEST_TYPES.LEAVE_GROUP: {
         const result = this.consumerGroupManager.leaveGroup(groupId, consumerId);
         if (result.success) {
-          console.log(`[Broker] Consumer "${consumerId}" left group "${groupId}" from ${clientAddr}`);
+          logger.info('Consumer left group', { groupId, consumerId, remoteBroker: clientAddr });
           return ProtocolResponse.leaveGroupAck(groupId, consumerId, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -320,10 +369,10 @@ export class MessageBroker {
             const groupInfoRes = this.consumerGroupManager.getGroupInfo(groupId);
             this.storageEngine.saveConsumerGroupOffsets(groupId, groupInfoRes);
           } catch (err) {
-            console.error(`[Broker Storage Error] Failed to persist group offset checkpoint: ${err.message}`);
+            logger.error('Failed to persist group offset checkpoint', { groupId, error: err.message });
           }
 
-          console.log(`[Broker] Committed offset ${offset} for group "${groupId}" on "${topic}" partition ${partition} from ${clientAddr}`);
+          logger.debug('Committed group offset', { groupId, topic, partition, offset, remoteBroker: clientAddr });
           return ProtocolResponse.commitOffsetAck(groupId, topic, partition, offset, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -333,7 +382,7 @@ export class MessageBroker {
       case REQUEST_TYPES.GET_GROUP_INFO: {
         const result = this.consumerGroupManager.getGroupInfo(groupId);
         if (result.success) {
-          console.log(`[Broker] Group info for "${groupId}" requested by ${clientAddr}`);
+          logger.debug('Group info requested', { groupId, remoteBroker: clientAddr });
           return ProtocolResponse.groupInfo(result, requestId);
         } else {
           return ProtocolResponse.error({ code: result.code, message: result.message }, requestId);
@@ -346,8 +395,20 @@ export class MessageBroker {
       case REQUEST_TYPES.REPLICA_SYNC_RESPONSE:
         return ProtocolResponse.replicaSyncResponse(topic, partition, getField('records') || [], requestId);
 
+      case REQUEST_TYPES.LEADER_ANNOUNCE:
+        return this.leaderElectionManager.handleLeaderAnnounce(
+          topic,
+          getField('partition'),
+          getField('leader'),
+          getField('leaderEpoch'),
+          getField('replicas')
+        );
+
+      case 'LEADER_ANNOUNCE_ACK':
+        return ProtocolResponse.leaderAnnounceAck(topic, partition, getField('leader'), getField('leaderEpoch'), requestId);
+
       default:
-        console.warn(`[Broker] Unhandled request type "${request.type}" from ${clientAddr}`);
+        logger.warn('Unhandled request type', { type: request.type, remoteBroker: clientAddr });
         return ProtocolResponse.error({ code: 'UNHANDLED_REQUEST_TYPE', message: `Unhandled request type "${request.type}"` }, requestId);
     }
   }

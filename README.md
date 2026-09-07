@@ -1,146 +1,186 @@
-# Distributed Message Broker — Milestone 8: Partition Replication & Replica Synchronization
+# Distributed Message Broker — Complete Milestones 1–10 Architecture
 
-A custom, lightweight, TCP-based distributed message broker built from scratch in Node.js without third-party messaging libraries or HTTP frameworks.
+A custom, lightweight, high-performance, containerized TCP-based distributed message broker built from scratch in Node.js without third-party messaging libraries or HTTP frameworks.
 
 ---
 
-## Milestone 8 Architecture: Partition Replication & Replica Synchronization
-
-Milestone 8 introduces **data replication** across multiple brokers in the cluster.
-
-Each topic partition has:
-- **One Leader**: Accepts PRODUCE writes from producers, appends records to its authoritative partition log & persistent storage, and replicates records to follower brokers.
-- **One or More Followers (Replicas)**: Persist replicated records at exact leader-assigned offsets and maintain isolated partition log segment files.
+## Complete End-to-End System Architecture (M1–M10)
 
 ```
-                    Producer
-                       |
-                   (PRODUCE)
-                       v
-         +---------------------------+
-         |     Partition Leader      |
-         |        (broker-1)         |
-         |  Append Local Log & Disk  |
-         +---------------------------+
-               /               \
-       (REPLICATE_RECORD)  (REPLICATE_RECORD)
-             /                   \
-            v                     v
-+-----------------------+   +-----------------------+
-|   Follower Replica    |   |   Follower Replica    |
-|      (broker-2)       |   |      (broker-3)       |
-| Persist Offset & Disk |   | Persist Offset & Disk |
-+-----------------------+   +-----------------------+
-            \                     /
-      (REPLICATE_ACK)       (REPLICATE_ACK)
-             \                   /
-              v                 v
-         +---------------------------+
-         |  Update High-Water Mark   |
-         |    Return PRODUCE_ACK     |
-         +---------------------------+
++-----------------------------------------------------------------------------------+
+|                           HTTP Observability Layer                                |
+|   ManagementServer (server/management-server.js) — GET /health, /metrics, /cluster|
++-----------------------------------------------------------------------------------+
+                                         |
++-----------------------------------------------------------------------------------+
+|                              TCP Server Layer                                     |
+|   BrokerServer (broker/server.js) — Handles Client & Inter-Broker TCP Connections |
++-----------------------------------------------------------------------------------+
+                                         |
++-----------------------------------------------------------------------------------+
+|                          Protocol & Framing Layer                                 |
+|   StreamFramer (framing.js) & ProtocolDecoder/Encoder (codec.js) (NDJSON wire)    |
++-----------------------------------------------------------------------------------+
+                                         |
++-----------------------------------------------------------------------------------+
+|                          MessageBroker Domain Core                                |
+|   MessageBroker (broker/broker.js) — Integrates Topics, Partitions, Groups        |
++-----------------------------------------------------------------------------------+
+     /                     |                     |                     \
+    v                      v                     v                      v
+TopicManager       ConsumerGroupManager   StorageEngine          ClusterManager
+(Topic & Partitions) (Group Rebalancing)  (Binary Log Segments) (Heartbeats & Node States)
+                                                 |                      |
+                                                 v                      v
+                                          LogSegments           ReplicationManager &
+                                         (0000.log & CRC32)     LeaderElectionManager
 ```
 
 ---
 
-## Key Concepts & Algorithms
+## Summary of Completed Milestones (M1–M10)
 
-### 1. Replication Factor
-Configurable option when creating topics (`replicationFactor`, default: 1).
-- $1 \le \text{replicationFactor} \le \text{totalClusterBrokers}$.
-- Invalid values return structured error code `INVALID_REPLICATION_FACTOR`.
+- **M1: Basic TCP Broker**: Native Node.js `net.Server` with concurrent client connections.
+- **M2: TCP Framing & Protocol**: Line-delimited NDJSON protocol (`StreamFramer`) handling fragmentation.
+- **M3: Topics & Routing**: Explicit topic creation (`CREATE_TOPIC`), listing (`LIST_TOPICS`), and isolation.
+- **M4: Partitions & Routing**: Key-based hashing (`hashKey(key) % P`), round-robin, explicit partition parameter, and per-partition FIFO ordering.
+- **M5: Offsets & Consumer Groups**: 0-indexed monotonic offsets, consumer group membership (`JOIN_GROUP`/`LEAVE_GROUP`), partition rebalancing, and offset commits (`COMMIT_OFFSET`).
+- **M6: Persistent Storage Engine**: Length-prefixed binary log segments (`000000000000.log`), CRC32 checksums, crash recovery (`recoverAllState()`).
+- **M7: Multi-Broker Cluster**: Static cluster topology, inter-broker TCP handshakes (`BROKER_HELLO`), and heartbeats (`BROKER_PING`).
+- **M8: Partition Replication**: Single-leader replication (`REPLICATE_RECORD`), High-Water Mark (`highWaterMark`), and follower catch-up sync (`REPLICA_SYNC`).
+- **M9: Failure Handling & Leader Election**: Deterministic election candidate ranking (highest offset primary, alphabetical broker ID tie-breaker), leader epoch incrementing (`leaderEpoch += 1`), stale leader protection (`NOT_LEADER`/`STALE_LEADER`), and old leader rejoin as follower.
+- **M10: Observability, Docker & Production Readiness**: Centralized structured JSON logger (`LOG_LEVEL`), in-memory metrics collector (`MetricsCollector`), HTTP management endpoints (`/metrics`, `/health`, `/cluster`), environment configuration (`ConfigLoader`), Dockerized 3-broker cluster compose setup with persistent volumes, graceful signal shutdown (`SIGINT`/`SIGTERM`), 10,000-message stress testing, and complete end-to-end integration.
 
-### 2. Deterministic Replica Assignment
-Given $N$ cluster brokers sorted by ID (`['broker-1', 'broker-2', 'broker-3']`), for partition $p$:
-- **Leader**: `brokers[p % N]`
-- **Replicas**: `[ brokers[(p + 0) % N], ..., brokers[(p + R - 1) % N] ]`
+---
 
-### 3. Leader Write Rule (`NOT_LEADER` Error)
-Only the partition leader can accept `PRODUCE` writes. If a producer sends a write to a follower:
-```json
-{
-  "type": "ERROR",
-  "success": false,
-  "error": {
-    "code": "NOT_LEADER",
-    "message": "Broker 'broker-2' is not the leader for topic 'orders' partition 0",
-    "topic": "orders",
-    "partition": 0,
-    "leader": "broker-1"
+## Environment Variables Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `BROKER_ID` | Unique identifier for local broker node | `broker-1` |
+| `BROKER_HOST` | Host IP for TCP server binding | `127.0.0.1` |
+| `BROKER_PORT` | Listening port for client & peer TCP sockets | `5000` |
+| `HTTP_PORT` | Listening port for HTTP observability management server | `8000` |
+| `BROKER_DATA_DIR` | Disk path for persistent log segments and checkpoints | `./data/broker-1` |
+| `CLUSTER_BROKERS` | Comma-separated list of static cluster nodes (`id:host:port`) | `broker-1:127.0.0.1:5000...` |
+| `REPLICATION_FACTOR` | Requested partition replica count | `1` |
+| `HEARTBEAT_INTERVAL` | Peer heartbeat check interval in milliseconds | `1000` |
+| `ELECTION_TIMEOUT` | Peer missed heartbeat timeout in milliseconds | `2000` |
+| `LOG_LEVEL` | Logging threshold (`DEBUG`, `INFO`, `WARN`, `ERROR`) | `INFO` |
+
+---
+
+## How to Run Locally
+
+1. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
+
+2. **Run Single Local Broker**:
+   ```bash
+   npm run broker
+   ```
+
+3. **Run 3-Broker Cluster Locally**:
+   ```bash
+   npm run broker -- --id=broker-1 --port=5000 --http-port=8001
+   npm run broker -- --id=broker-2 --port=5001 --http-port=8002
+   npm run broker -- --id=broker-3 --port=5002 --http-port=8003
+   ```
+
+---
+
+## How to Run with Docker Compose
+
+1. **Start 3-Broker Docker Cluster**:
+   ```bash
+   docker compose up --build
+   ```
+
+2. **Verify Container Cluster Status**:
+   ```bash
+   docker compose ps
+   ```
+
+3. **Stop Docker Cluster & Retain Volumes**:
+   ```bash
+   docker compose down
+   ```
+
+4. **Stop Docker Cluster & Remove Volumes**:
+   ```bash
+   docker compose down -v
+   ```
+
+---
+
+## HTTP Observability Endpoints
+
+- **GET /health**:
+  ```json
+  {
+    "status": "HEALTHY",
+    "brokerId": "broker-1",
+    "uptime": 124.5,
+    "clusterSize": 3
   }
-}
-```
-
-### 4. High-Water Mark ($HWM$)
-The High-Water Mark tracks the minimum `lastReplicatedOffset` among all active caught-up replicas for a partition. It advances as followers acknowledge record replication.
-
-### 5. Follower Recovery & Catch-up (`REPLICA_SYNC`)
-When a follower broker restarts after failure:
-1. Follower determines its highest local partition offset.
-2. Sends `REPLICA_SYNC` request to the partition leader with `fromOffset`.
-3. Leader fetches missing records and sends `REPLICA_SYNC_RESPONSE`.
-4. Follower appends missing records in order to local storage while preserving leader offsets.
-5. Follower state transitions back to `CAUGHT_UP`.
-
----
-
-## Scope Limits: What Milestone 8 Supports & Does NOT Support
-
-### Supported in Milestone 8
-- Configurable replication factor and deterministic replica assignment
-- Leader write rule enforcement (`NOT_LEADER` error)
-- Inter-broker record replication (`REPLICATE_RECORD` / `REPLICATE_ACK`)
-- Follower record persistence & exact offset preservation
-- High-Water Mark calculation
-- Follower recovery & catch-up sync (`REPLICA_SYNC` / `REPLICA_SYNC_RESPONSE`)
-- Consumer reads from Leader
-
-### Intentionally NOT Supported in Milestone 8
-- Leader election & automatic failover
-- Raft / Paxos consensus algorithm
-- Follower reads
-- Dynamic partition reassignment
+  ```
+- **GET /metrics**:
+  ```text
+  connections_total 10
+  active_connections 2
+  messages_produced_total 10000
+  messages_consumed_total 9500
+  produce_errors_total 0
+  consume_errors_total 0
+  replication_success_total 10000
+  replication_failure_total 0
+  replica_sync_total 3
+  leader_elections_total 1
+  leader_changes_total 1
+  produce_latency_avg_ms 1.15
+  consume_latency_avg_ms 0.85
+  replication_latency_avg_ms 2.05
+  ```
+- **GET /cluster**:
+  ```json
+  [
+    { "id": "broker-1", "host": "broker-1", "port": 5000, "status": "alive" },
+    { "id": "broker-2", "host": "broker-2", "port": 5001, "status": "alive" },
+    { "id": "broker-3", "host": "broker-3", "port": 5002, "status": "alive" }
+  ]
+  ```
 
 ---
 
-## How to Run a 3-Broker Replicated Cluster Setup
+## Testing Commands
 
-1. **Start Broker 1 (Port 5000)**:
-   ```bash
-   npm run broker -- --id=broker-1 --port=5000
-   ```
-2. **Start Broker 2 (Port 5001)**:
-   ```bash
-   npm run broker -- --id=broker-2 --port=5001
-   ```
-3. **Start Broker 3 (Port 5002)**:
-   ```bash
-   npm run broker -- --id=broker-3 --port=5002
-   ```
-
-4. **Create a Replicated Topic**:
-   ```json
-   { "type": "CREATE_TOPIC", "payload": { "topic": "orders", "partitions": 3, "replicationFactor": 3 } }
-   ```
+- **Run All 15 Test Suites**:
+  ```bash
+  npm test
+  ```
+- **Run Observability & Docker Unit Tests**:
+  ```bash
+  npm run test:m10
+  ```
+- **Run 10,000-Message Stress & E2E Test**:
+  ```bash
+  npm run test:stress
+  ```
 
 ---
 
-## Test Execution
+## Simulating Failures & Recovery
 
-```bash
-npm test
-```
-Or run replication test suite specifically:
-```bash
-npm run test:replication
-```
+1. **Simulate Follower Failure**: Stop `broker-3`. The leader continues accepting produce requests and tracks lag. When `broker-3` restarts, it issues `REPLICA_SYNC` to catch up missing log segments.
+2. **Simulate Leader Failure**: Stop `broker-1` (the partition 0 leader). Remaining brokers detect node failure via heartbeats, run deterministic leader election, elect `broker-2` as the new leader, increment `leaderEpoch`, and broadcast `LEADER_ANNOUNCE`.
+3. **Simulate Old Leader Rejoin**: Restart `broker-1`. It detects current leader & epoch, rejoins as a follower, issues `REPLICA_SYNC`, catches up, and does NOT usurp active leadership.
 
 ---
 
-## Core Components Architecture
+## Known Limitations
 
-- [replication-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cluster/replication-manager.js) — `ReplicationManager`: Replication coordinator, leader write checks, high-water mark, follower sync.
-- [broker-node.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cluster/broker-node.js) — `BrokerNode`: Node entity tracking broker status and socket handle.
-- [cluster-manager.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/cluster/cluster-manager.js) — `ClusterManager`: Cluster topology manager and heartbeat loop.
-- [partition.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/partition.js) — `Partition`: Append-only log supporting `enqueueWithOffset`.
-- [broker.js](file:///c:/Users/amrit/OneDrive/Desktop/distributed-message-broker/src/broker/broker.js) — `MessageBroker`: Core domain orchestrator enforcing `NOT_LEADER` rules.
+- Static cluster topology configuration (dynamic cluster membership is out of scope).
+- Follower brokers reject consumer read requests with `NOT_LEADER` (all consumer reads route through partition leaders).
+- Raft/Paxos/ZooKeeper consensus protocols are intentionally not used to maintain a clear, deterministic implementation.

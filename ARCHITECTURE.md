@@ -1,39 +1,34 @@
-# Distributed Message Broker Architecture — Milestone 8
+# Distributed Message Broker Architecture — Milestone 9
 
 ## Overview
-A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, persistent append-only log segments, crash recovery, consumer groups with deterministic rebalancing, multi-broker cluster topology, inter-broker TCP heartbeats, partition replication across follower brokers (`REPLICATE_RECORD` / `REPLICATE_ACK`), leader write enforcement (`NOT_LEADER` error), High-Water Mark tracking, and follower catch-up sync (`REPLICA_SYNC`).
+A lightweight, high-performance distributed message broker implemented in Node.js using native TCP networking, custom line-delimited (NDJSON) framing, multi-partition topic streams, persistent append-only log segments, crash recovery, consumer groups with deterministic rebalancing, multi-broker cluster topology, inter-broker TCP heartbeats, partition replication across follower brokers (`REPLICATE_RECORD` / `REPLICATE_ACK`), leader failure detection, deterministic leader election (`LeaderElectionManager`), leader epoch tracking (`leaderEpoch`), stale leader rejection (`STALE_LEADER` / `NOT_LEADER`), and follower catch-up sync (`REPLICA_SYNC`).
 
 ---
 
-## Replication Flow Diagram
+## Failover & Leader Election Flow
 
 ```
-                    Producer
-                       |
-                   (PRODUCE)
-                       v
-         +---------------------------+
-         |     Partition Leader      |
-         |        (broker-1)         |
-         |  Append Local Log & Disk  |
-         +---------------------------+
-               /               \
-       (REPLICATE_RECORD)  (REPLICATE_RECORD)
-             /                   \
-            v                     v
-+-----------------------+   +-----------------------+
-|   Follower Replica    |   |   Follower Replica    |
-|      (broker-2)       |   |      (broker-3)       |
-| Persist Offset & Disk |   | Persist Offset & Disk |
-+-----------------------+   +-----------------------+
-            \                     /
-      (REPLICATE_ACK)       (REPLICATE_ACK)
-             \                   /
-              v                 v
-         +---------------------------+
-         |  Update High-Water Mark   |
-         |    Return PRODUCE_ACK     |
-         +---------------------------+
+                         Broker Failure (broker-1)
+                                     |
+                         Failure Detector (Heartbeat / Socket Close)
+                                     |
+                     Partition Marked as Requiring Election
+                                     |
+                        Evaluate ALIVE Replicas
+                                     |
+             Filter Candidates -> Rank by Highest Offset -> Tie-Break by Broker ID
+                                     |
+                         New Leader Elected (broker-2)
+                                     |
+                            Increment leaderEpoch
+                                     |
+                          Broadcast LEADER_ANNOUNCE
+                                     |
+               +-------------------------------------------+
+               |                                           |
+    New Leader (broker-2)                        Old Leader (broker-1)
+  Accepts PRODUCE & CONSUME                      Rejoins as Follower &
+                                                 Syncs via REPLICA_SYNC
 ```
 
 ---
@@ -68,11 +63,10 @@ A lightweight, high-performance distributed message broker implemented in Node.j
 +-------------------------------------------------------------------------+
 |                       Server Routing Switch                             |
 +-------------------------------------------------------------------------+
-           /                           |                           \
-          v                            v                            v
-(BROKER_HELLO/PING)            (REPLICATE/SYNC)              (Client Requests)
-          |                            |                            |
-          v                            v                            v
-  ClusterManager              ReplicationManager              MessageBroker
-(cluster-manager.js)       (replication-manager.js)           (broker.js)
+     /                  |                     |                    \
+    v                   v                     v                     v
+(BROKER_HELLO/PING) (LEADER_ANNOUNCE)   (REPLICATE/SYNC)     (Client Requests)
+    |                   |                     |                     |
+    v                   v                     v                     v
+ClusterManager  LeaderElectionManager  ReplicationManager     MessageBroker
 ```

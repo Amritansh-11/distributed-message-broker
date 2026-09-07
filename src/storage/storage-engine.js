@@ -120,6 +120,17 @@ export class StorageEngine {
   }
 
   /**
+   * Flushes all open active segments to disk.
+   */
+  flushAll() {
+    for (const segment of this.activeSegments.values()) {
+      if (segment && typeof segment.flush === 'function') {
+        segment.flush();
+      }
+    }
+  }
+
+  /**
    * Recovers broker in-memory state from disk logs on startup.
    * Reconstructs topics, partition logs, offsets, and consumer-group checkpoints.
    * 
@@ -250,6 +261,7 @@ export class StorageEngine {
    * Resets active segment maps.
    */
   close() {
+    this.flushAll();
     this.activeSegments.clear();
     this.allSegments.clear();
   }
